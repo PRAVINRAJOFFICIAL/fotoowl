@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import {
-  Plus, Upload, Users, Image, BarChart3, Calendar, Trash2, LogIn
+  Plus, Upload, Users, Image, BarChart3, Calendar, Trash2, LogIn, Brain
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,6 +10,7 @@ import EventCard from "@/components/EventCard";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
 import { useNavigate } from "react-router-dom";
+import { detectFaces } from "@/lib/faceRecognition";
 
 type AdminTab = "events" | "analytics";
 
@@ -32,6 +33,7 @@ const Admin = () => {
   const [user, setUser] = useState<any>(null);
   const [photoCountMap, setPhotoCountMap] = useState<Record<string, number>>({});
   const [uploadingEventId, setUploadingEventId] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
 
@@ -55,7 +57,6 @@ const Admin = () => {
       toast({ title: "Error", description: error.message, variant: "destructive" });
     } else {
       setEvents(data || []);
-      // Fetch photo counts
       if (data && data.length > 0) {
         const ids = data.map((e: EventRow) => e.id);
         const { data: photos } = await supabase
@@ -120,8 +121,9 @@ const Admin = () => {
 
     const totalFiles = files.length;
     let uploaded = 0;
+    let facesDetected = 0;
 
-    toast({ title: "Uploading...", description: `0/${totalFiles} photos` });
+    setUploadProgress(`Uploading 0/${totalFiles}...`);
 
     for (const file of Array.from(files)) {
       const ext = file.name.split(".").pop();
@@ -132,21 +134,48 @@ const Admin = () => {
         .upload(path, file);
 
       if (uploadError) {
-        toast({ title: "Upload failed", description: uploadError.message, variant: "destructive" });
+        console.error("Upload error:", uploadError.message);
         continue;
       }
 
       const { data: urlData } = supabase.storage.from("event-photos").getPublicUrl(path);
+      const imageUrl = urlData.publicUrl;
 
-      await supabase.from("photos").insert({
-        event_id: uploadingEventId,
-        image_url: urlData.publicUrl,
-      });
+      // Insert photo record
+      const { data: photoRow, error: insertErr } = await supabase
+        .from("photos")
+        .insert({ event_id: uploadingEventId, image_url: imageUrl })
+        .select("id")
+        .single();
+
+      if (insertErr || !photoRow) {
+        console.error("Photo insert error:", insertErr?.message);
+        continue;
+      }
 
       uploaded++;
+      setUploadProgress(`Uploading ${uploaded}/${totalFiles} — Detecting faces...`);
+
+      // Detect faces and store descriptors
+      try {
+        const descriptors = await detectFaces(imageUrl);
+        for (const desc of descriptors) {
+          await supabase.from("faces").insert({
+            photo_id: photoRow.id,
+            descriptor: Array.from(desc),
+          });
+          facesDetected++;
+        }
+      } catch (err) {
+        console.warn("Face detection failed for a photo, skipping:", err);
+      }
     }
 
-    toast({ title: "Upload Complete!", description: `${uploaded}/${totalFiles} photos uploaded` });
+    setUploadProgress(null);
+    toast({
+      title: "Upload Complete!",
+      description: `${uploaded}/${totalFiles} photos uploaded, ${facesDetected} faces detected`,
+    });
     setUploadingEventId(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
     fetchEvents(user.id);
@@ -197,6 +226,18 @@ const Admin = () => {
             Create Event
           </Button>
         </div>
+
+        {/* Upload progress banner */}
+        {uploadProgress && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mb-6 bg-primary/10 border border-primary/20 rounded-xl p-4 flex items-center gap-3"
+          >
+            <Brain className="w-5 h-5 text-primary animate-pulse" />
+            <span className="text-sm text-foreground font-display">{uploadProgress}</span>
+          </motion.div>
+        )}
 
         {/* Create Event Form */}
         {showCreate && (

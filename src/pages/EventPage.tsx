@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useParams } from "react-router-dom";
-import { Upload, Camera, Search, Download, Heart, Share2, Image as ImageIcon, Users, ArrowLeft, Loader2 } from "lucide-react";
+import { Upload, Camera, Search, Download, Heart, Share2, Image as ImageIcon, ArrowLeft, Loader2, Brain, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Link } from "react-router-dom";
 import Navbar from "@/components/Navbar";
@@ -10,6 +10,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
+import { detectSelfie, matchFaces, loadFaceModels } from "@/lib/faceRecognition";
 
 type ViewMode = "gallery" | "selfie" | "results";
 
@@ -31,13 +32,22 @@ const EventPage = () => {
   const { eventId } = useParams();
   const [viewMode, setViewMode] = useState<ViewMode>("gallery");
   const [selfiePreview, setSelfiePreview] = useState<string | null>(null);
+  const [selfieFile, setSelfieFile] = useState<File | null>(null);
   const [isSearching, setIsSearching] = useState(false);
+  const [searchStatus, setSearchStatus] = useState("");
   const [showQR, setShowQR] = useState(false);
   const [event, setEvent] = useState<EventRow | null>(null);
-  const [photos, setPhotos] = useState<PhotoRow[]>([]);
+  const [allPhotos, setAllPhotos] = useState<PhotoRow[]>([]);
+  const [matchedPhotos, setMatchedPhotos] = useState<PhotoRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState(false);
+  const [noFaceFound, setNoFaceFound] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Preload face models when component mounts
+  useEffect(() => {
+    loadFaceModels().catch(console.error);
+  }, []);
 
   useEffect(() => {
     if (eventId) fetchEvent();
@@ -45,7 +55,6 @@ const EventPage = () => {
 
   const fetchEvent = async () => {
     setLoading(true);
-    // Try to find by event_code first, then by id
     let { data, error } = await supabase
       .from("events")
       .select("*")
@@ -65,47 +74,110 @@ const EventPage = () => {
     }
 
     setEvent(data as EventRow);
-    
-    // Fetch photos
+
     const { data: photosData } = await supabase
       .from("photos")
       .select("*")
       .eq("event_id", (data as EventRow).id)
       .order("created_at", { ascending: false });
 
-    setPhotos((photosData as PhotoRow[]) || []);
+    setAllPhotos((photosData as PhotoRow[]) || []);
     setLoading(false);
   };
 
   const handleSelfieUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      setSelfieFile(file);
+      setNoFaceFound(false);
       const reader = new FileReader();
       reader.onload = (ev) => setSelfiePreview(ev.target?.result as string);
       reader.readAsDataURL(file);
     }
   };
 
-  const handleFindPhotos = () => {
+  const handleFindPhotos = async () => {
+    if (!selfiePreview || !event) return;
+
     setIsSearching(true);
-    // Simulate AI search — shows all photos for now
-    setTimeout(() => {
-      setIsSearching(false);
+    setNoFaceFound(false);
+    setSearchStatus("Loading AI models...");
+
+    try {
+      // Step 1: Detect face in selfie
+      setSearchStatus("Detecting your face...");
+      const selfieDescriptor = await detectSelfie(selfiePreview);
+
+      if (!selfieDescriptor) {
+        setNoFaceFound(true);
+        setIsSearching(false);
+        setSearchStatus("");
+        toast({ title: "No face detected", description: "Please upload a clear selfie with your face visible", variant: "destructive" });
+        return;
+      }
+
+      // Step 2: Fetch stored face descriptors for this event
+      setSearchStatus("Searching through event photos...");
+
+      // Get all photo IDs for this event
+      const photoIds = allPhotos.map((p) => p.id);
+      if (photoIds.length === 0) {
+        setMatchedPhotos([]);
+        setIsSearching(false);
+        setViewMode("results");
+        return;
+      }
+
+      const { data: facesData, error } = await supabase
+        .from("faces")
+        .select("photo_id, descriptor")
+        .in("photo_id", photoIds);
+
+      if (error) {
+        toast({ title: "Error", description: error.message, variant: "destructive" });
+        setIsSearching(false);
+        return;
+      }
+
+      // Step 3: Match
+      setSearchStatus("AI is finding your photos...");
+      const storedFaces = (facesData || []).map((f: any) => ({
+        photo_id: f.photo_id as string,
+        descriptor: f.descriptor as number[],
+      }));
+
+      const matchedIds = matchFaces(selfieDescriptor, storedFaces, 0.55);
+
+      // Filter photos to only matched ones
+      const matched = allPhotos.filter((p) => matchedIds.includes(p.id));
+      setMatchedPhotos(matched);
       setViewMode("results");
-    }, 2500);
+
+      if (matched.length === 0) {
+        toast({ title: "No matches found", description: "Try a different selfie or check back when more photos are uploaded" });
+      }
+    } catch (err) {
+      console.error("Face matching error:", err);
+      toast({ title: "Error", description: "Face recognition failed. Please try again.", variant: "destructive" });
+    }
+
+    setIsSearching(false);
+    setSearchStatus("");
   };
 
+  const displayPhotos = viewMode === "results" ? matchedPhotos : allPhotos;
+
   const handleDownloadAll = async () => {
-    if (photos.length === 0) return;
+    if (displayPhotos.length === 0) return;
     setDownloading(true);
     try {
       const zip = new JSZip();
       const folder = zip.folder(event?.name || "photos");
 
-      for (let i = 0; i < photos.length; i++) {
-        const response = await fetch(photos[i].image_url);
+      for (let i = 0; i < displayPhotos.length; i++) {
+        const response = await fetch(displayPhotos[i].image_url);
         const blob = await response.blob();
-        const ext = photos[i].image_url.split('.').pop()?.split('?')[0] || 'jpg';
+        const ext = displayPhotos[i].image_url.split('.').pop()?.split('?')[0] || 'jpg';
         folder?.file(`photo_${i + 1}.${ext}`, blob);
       }
 
@@ -174,7 +246,7 @@ const EventPage = () => {
               {event.date && (
                 <span>{new Date(event.date).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}</span>
               )}
-              <span className="flex items-center gap-1"><ImageIcon className="w-3.5 h-3.5" />{photos.length} photos</span>
+              <span className="flex items-center gap-1"><ImageIcon className="w-3.5 h-3.5" />{allPhotos.length} photos</span>
             </div>
           </div>
           <div className="flex gap-3">
@@ -182,7 +254,7 @@ const EventPage = () => {
               <Share2 className="w-4 h-4" />
               Share
             </Button>
-            <Button variant="hero" size="sm" onClick={() => setViewMode("selfie")}>
+            <Button variant="hero" size="sm" onClick={() => { setViewMode("selfie"); setMatchedPhotos([]); setNoFaceFound(false); }}>
               <Camera className="w-4 h-4" />
               Find My Photos
             </Button>
@@ -225,7 +297,7 @@ const EventPage = () => {
                 <div className="relative mb-6">
                   <img src={selfiePreview} alt="Your selfie" className="w-48 h-48 mx-auto rounded-2xl object-cover border-2 border-primary/30" />
                   <button
-                    onClick={() => { setSelfiePreview(null); if (fileInputRef.current) fileInputRef.current.value = ""; }}
+                    onClick={() => { setSelfiePreview(null); setSelfieFile(null); setNoFaceFound(false); if (fileInputRef.current) fileInputRef.current.value = ""; }}
                     className="absolute top-2 right-2 bg-background/80 rounded-full p-1 text-foreground"
                   >
                     ×
@@ -246,11 +318,25 @@ const EventPage = () => {
                 </label>
               )}
 
+              {noFaceFound && (
+                <div className="flex items-center gap-2 text-destructive text-sm mb-4 justify-center">
+                  <AlertCircle className="w-4 h-4" />
+                  No face detected. Please try a clearer photo.
+                </div>
+              )}
+
+              {isSearching && searchStatus && (
+                <div className="flex items-center gap-2 text-primary text-sm mb-4 justify-center">
+                  <Brain className="w-4 h-4 animate-pulse" />
+                  {searchStatus}
+                </div>
+              )}
+
               <Button variant="hero" size="lg" className="w-full" disabled={!selfiePreview || isSearching} onClick={handleFindPhotos}>
                 {isSearching ? (
                   <>
-                    <Search className="w-5 h-5 animate-pulse" />
-                    Searching with AI...
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    AI is finding your photos...
                   </>
                 ) : (
                   <>
@@ -276,13 +362,24 @@ const EventPage = () => {
                   {selfiePreview && <img src={selfiePreview} alt="You" className="w-full h-full object-cover" />}
                 </div>
                 <span className="text-sm text-foreground font-display">
-                  Found <strong className="text-primary">{photos.length} photos</strong> of you!
+                  {matchedPhotos.length > 0 ? (
+                    <>Found <strong className="text-primary">{matchedPhotos.length} photos</strong> of you!</>
+                  ) : (
+                    <>No matching photos found. <button className="text-primary underline" onClick={() => setViewMode("selfie")}>Try another selfie</button></>
+                  )}
                 </span>
               </div>
-              <Button variant="hero" size="sm" onClick={handleDownloadAll} disabled={downloading}>
-                <Download className="w-4 h-4" />
-                {downloading ? "Zipping..." : "Download All"}
-              </Button>
+              <div className="flex gap-2">
+                <Button variant="glass" size="sm" onClick={() => { setViewMode("gallery"); setMatchedPhotos([]); }}>
+                  View All
+                </Button>
+                {matchedPhotos.length > 0 && (
+                  <Button variant="hero" size="sm" onClick={handleDownloadAll} disabled={downloading}>
+                    <Download className="w-4 h-4" />
+                    {downloading ? "Zipping..." : "Download All"}
+                  </Button>
+                )}
+              </div>
             </div>
           </motion.div>
         )}
@@ -290,15 +387,15 @@ const EventPage = () => {
         {/* Photo Grid */}
         {(viewMode === "gallery" || viewMode === "results") && (
           <>
-            {photos.length === 0 ? (
+            {displayPhotos.length === 0 && viewMode === "gallery" ? (
               <div className="text-center py-16">
                 <ImageIcon className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
                 <h3 className="font-display font-semibold text-lg mb-2">No photos yet</h3>
                 <p className="text-muted-foreground text-sm">The photographer hasn't uploaded photos for this event yet</p>
               </div>
-            ) : (
+            ) : displayPhotos.length === 0 && viewMode === "results" ? null : (
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 md:gap-4">
-                {photos.map((photo, i) => (
+                {displayPhotos.map((photo, i) => (
                   <motion.div
                     key={photo.id}
                     initial={{ opacity: 0, scale: 0.95 }}

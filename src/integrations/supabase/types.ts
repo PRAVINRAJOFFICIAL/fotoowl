@@ -44,6 +44,35 @@ export type Database = {
         }
         Relationships: []
       }
+      faces: {
+        Row: {
+          created_at: string
+          descriptor: number[]
+          id: string
+          photo_id: string
+        }
+        Insert: {
+          created_at?: string
+          descriptor: number[]
+          id?: string
+          photo_id: string
+        }
+        Update: {
+          created_at?: string
+          descriptor?: number[]
+          id?: string
+          photo_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "faces_photo_id_fkey"
+            columns: ["photo_id"]
+            isOneToOne: false
+            referencedRelation: "photos"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       photos: {
         Row: {
           created_at: string
