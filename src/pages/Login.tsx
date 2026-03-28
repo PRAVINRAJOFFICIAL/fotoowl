@@ -1,25 +1,53 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { LogIn, Phone, ArrowRight, Eye, EyeOff } from "lucide-react";
+import { LogIn, ArrowRight, Eye, EyeOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import Navbar from "@/components/Navbar";
 import OwlLogo from "@/components/OwlLogo";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "@/hooks/use-toast";
 
-type AuthMode = "login" | "register" | "otp";
+type AuthMode = "login" | "register";
 
 const Login = () => {
   const [mode, setMode] = useState<AuthMode>("login");
   const [showPassword, setShowPassword] = useState(false);
-  const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
-  const [otp, setOtp] = useState("");
-  const [otpSent, setOtpSent] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const navigate = useNavigate();
 
-  const handleSendOtp = () => {
-    if (phone.trim()) setOtpSent(true);
+  const handleSubmit = async () => {
+    if (!email || !password) {
+      toast({ title: "Error", description: "Email and password are required", variant: "destructive" });
+      return;
+    }
+    setLoading(true);
+
+    if (mode === "register") {
+      const { error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: { data: { display_name: name || email } },
+      });
+      if (error) {
+        toast({ title: "Error", description: error.message, variant: "destructive" });
+      } else {
+        toast({ title: "Check your email", description: "We sent you a confirmation link" });
+      }
+    } else {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) {
+        toast({ title: "Error", description: error.message, variant: "destructive" });
+      } else {
+        toast({ title: "Welcome back!" });
+        navigate("/admin");
+      }
+    }
+    setLoading(false);
   };
 
   return (
@@ -38,94 +66,65 @@ const Login = () => {
           <div className="bg-gradient-card border border-border rounded-2xl p-8 shadow-card">
             {/* Tab switcher */}
             <div className="flex bg-secondary rounded-xl p-1 mb-6">
-              {(["login", "register", "otp"] as AuthMode[]).map((m) => (
+              {(["login", "register"] as AuthMode[]).map((m) => (
                 <button
                   key={m}
                   className={`flex-1 text-xs font-display font-medium py-2 rounded-lg transition-all ${mode === m ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
                   onClick={() => setMode(m)}
                 >
-                  {m === "otp" ? "Phone OTP" : m === "login" ? "Sign In" : "Register"}
+                  {m === "login" ? "Sign In" : "Register"}
                 </button>
               ))}
             </div>
 
-            {mode === "otp" ? (
-              <div className="space-y-4">
+            <div className="space-y-4">
+              {mode === "register" && (
                 <div>
-                  <label className="text-sm font-display font-medium text-foreground mb-1.5 block">Phone Number</label>
+                  <label className="text-sm font-display font-medium text-foreground mb-1.5 block">Full Name</label>
                   <Input
-                    placeholder="+91 9876543210"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
+                    placeholder="John Doe"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
                     className="bg-secondary border-border text-foreground h-11"
                   />
                 </div>
-                {otpSent && (
-                  <div>
-                    <label className="text-sm font-display font-medium text-foreground mb-1.5 block">Enter OTP</label>
-                    <Input
-                      placeholder="6-digit code"
-                      value={otp}
-                      onChange={(e) => setOtp(e.target.value)}
-                      maxLength={6}
-                      className="bg-secondary border-border text-foreground h-11 text-center tracking-[0.5em] font-display text-lg"
-                    />
-                  </div>
-                )}
-                <Button variant="hero" size="lg" className="w-full" onClick={otpSent ? undefined : handleSendOtp}>
-                  <Phone className="w-4 h-4" />
-                  {otpSent ? "Verify OTP" : "Send OTP"}
-                </Button>
+              )}
+              <div>
+                <label className="text-sm font-display font-medium text-foreground mb-1.5 block">Email</label>
+                <Input
+                  type="email"
+                  placeholder="you@email.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="bg-secondary border-border text-foreground h-11"
+                />
               </div>
-            ) : (
-              <div className="space-y-4">
-                {mode === "register" && (
-                  <div>
-                    <label className="text-sm font-display font-medium text-foreground mb-1.5 block">Full Name</label>
-                    <Input
-                      placeholder="John Doe"
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                      className="bg-secondary border-border text-foreground h-11"
-                    />
-                  </div>
-                )}
-                <div>
-                  <label className="text-sm font-display font-medium text-foreground mb-1.5 block">Email</label>
+              <div>
+                <label className="text-sm font-display font-medium text-foreground mb-1.5 block">Password</label>
+                <div className="relative">
                   <Input
-                    type="email"
-                    placeholder="you@email.com"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    className="bg-secondary border-border text-foreground h-11"
+                    type={showPassword ? "text" : "password"}
+                    placeholder="••••••••"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="bg-secondary border-border text-foreground h-11 pr-10"
+                    onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
                   />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
                 </div>
-                <div>
-                  <label className="text-sm font-display font-medium text-foreground mb-1.5 block">Password</label>
-                  <div className="relative">
-                    <Input
-                      type={showPassword ? "text" : "password"}
-                      placeholder="••••••••"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      className="bg-secondary border-border text-foreground h-11 pr-10"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(!showPassword)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    >
-                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                </div>
-                <Button variant="hero" size="lg" className="w-full">
-                  <LogIn className="w-4 h-4" />
-                  {mode === "login" ? "Sign In" : "Create Account"}
-                  <ArrowRight className="w-4 h-4" />
-                </Button>
               </div>
-            )}
+              <Button variant="hero" size="lg" className="w-full" onClick={handleSubmit} disabled={loading}>
+                <LogIn className="w-4 h-4" />
+                {loading ? "Please wait..." : mode === "login" ? "Sign In" : "Create Account"}
+                {!loading && <ArrowRight className="w-4 h-4" />}
+              </Button>
+            </div>
           </div>
         </motion.div>
       </div>
