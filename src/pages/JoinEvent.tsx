@@ -5,15 +5,32 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import Navbar from "@/components/Navbar";
 import { motion } from "framer-motion";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "@/hooks/use-toast";
 
 const JoinEvent = () => {
   const [eventCode, setEventCode] = useState("");
+  const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
-  const handleJoin = () => {
-    if (eventCode.trim()) {
-      navigate(`/event/${eventCode.trim()}`);
+  const handleJoin = async () => {
+    const code = eventCode.trim();
+    if (!code) return;
+
+    setLoading(true);
+    const { data, error } = await supabase
+      .from("events")
+      .select("id, event_code")
+      .eq("event_code", code)
+      .maybeSingle();
+
+    if (error || !data) {
+      toast({ title: "Event not found", description: "Check the code and try again", variant: "destructive" });
+      setLoading(false);
+      return;
     }
+
+    navigate(`/event/${data.event_code}`);
   };
 
   return (
@@ -37,7 +54,7 @@ const JoinEvent = () => {
             <div>
               <label className="text-sm font-display font-medium text-foreground mb-2 block">Event Code</label>
               <Input
-                placeholder="e.g. WEDDING2024"
+                placeholder="e.g. ABC123"
                 value={eventCode}
                 onChange={(e) => setEventCode(e.target.value.toUpperCase())}
                 className="bg-secondary border-border text-foreground placeholder:text-muted-foreground h-12 text-center text-lg font-display tracking-widest"
@@ -45,9 +62,9 @@ const JoinEvent = () => {
               />
             </div>
 
-            <Button variant="hero" size="lg" className="w-full" onClick={handleJoin} disabled={!eventCode.trim()}>
-              Join Event
-              <ArrowRight className="w-5 h-5" />
+            <Button variant="hero" size="lg" className="w-full" onClick={handleJoin} disabled={!eventCode.trim() || loading}>
+              {loading ? "Joining..." : "Join Event"}
+              {!loading && <ArrowRight className="w-5 h-5" />}
             </Button>
 
             <div className="relative">
