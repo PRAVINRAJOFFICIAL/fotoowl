@@ -1,37 +1,191 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import {
-  Plus, Upload, Users, Image, BarChart3, Calendar, Trash2, Eye, QrCode, Settings
+  Plus, Upload, Users, Image, BarChart3, Calendar, Trash2, LogIn
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import Navbar from "@/components/Navbar";
 import EventCard from "@/components/EventCard";
-import { QRCodeSVG } from "qrcode.react";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "@/hooks/use-toast";
+import { useNavigate } from "react-router-dom";
 
 type AdminTab = "events" | "analytics";
 
-const mockEvents = [
-  { id: "1", name: "Sarah & John's Wedding", date: "2024-03-15", guestCount: 124, photoCount: 487, eventCode: "WED2024", coverImage: "https://picsum.photos/seed/wed/600/400" },
-  { id: "2", name: "College Fest 2024", date: "2024-04-20", guestCount: 342, photoCount: 1204, eventCode: "FEST24", coverImage: "https://picsum.photos/seed/fest/600/400" },
-  { id: "3", name: "Corporate Meetup", date: "2024-05-10", guestCount: 56, photoCount: 189, eventCode: "CORP24", coverImage: "https://picsum.photos/seed/corp/600/400" },
-];
+interface EventRow {
+  id: string;
+  name: string;
+  date: string | null;
+  event_code: string;
+  cover_image: string | null;
+  created_at: string;
+}
 
 const Admin = () => {
   const [tab, setTab] = useState<AdminTab>("events");
   const [showCreate, setShowCreate] = useState(false);
   const [newEvent, setNewEvent] = useState({ name: "", date: "" });
+  const [events, setEvents] = useState<EventRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [user, setUser] = useState<any>(null);
+  const [photoCountMap, setPhotoCountMap] = useState<Record<string, number>>({});
+  const [uploadingEventId, setUploadingEventId] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => {
+      setUser(data.user);
+      if (data.user) fetchEvents(data.user.id);
+      else setLoading(false);
+    });
+  }, []);
+
+  const fetchEvents = async (userId: string) => {
+    setLoading(true);
+    const { data, error } = await supabase
+      .from("events")
+      .select("*")
+      .eq("created_by", userId)
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      setEvents(data || []);
+      // Fetch photo counts
+      if (data && data.length > 0) {
+        const ids = data.map((e: EventRow) => e.id);
+        const { data: photos } = await supabase
+          .from("photos")
+          .select("event_id")
+          .in("event_id", ids);
+        const counts: Record<string, number> = {};
+        photos?.forEach((p: { event_id: string }) => {
+          counts[p.event_id] = (counts[p.event_id] || 0) + 1;
+        });
+        setPhotoCountMap(counts);
+      }
+    }
+    setLoading(false);
+  };
+
+  const generateEventCode = () => {
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let code = "";
+    for (let i = 0; i < 6; i++) code += chars.charAt(Math.floor(Math.random() * chars.length));
+    return code;
+  };
+
+  const handleCreateEvent = async () => {
+    if (!newEvent.name.trim()) {
+      toast({ title: "Error", description: "Event name is required", variant: "destructive" });
+      return;
+    }
+    setCreating(true);
+    const eventCode = generateEventCode();
+    const { error } = await supabase.from("events").insert({
+      name: newEvent.name.trim(),
+      date: newEvent.date || null,
+      event_code: eventCode,
+      created_by: user.id,
+    });
+
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Event Created!", description: `Code: ${eventCode}` });
+      setNewEvent({ name: "", date: "" });
+      setShowCreate(false);
+      fetchEvents(user.id);
+    }
+    setCreating(false);
+  };
+
+  const handleDeleteEvent = async (eventId: string) => {
+    const { error } = await supabase.from("events").delete().eq("id", eventId);
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Event deleted" });
+      fetchEvents(user.id);
+    }
+  };
+
+  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || !uploadingEventId) return;
+
+    const totalFiles = files.length;
+    let uploaded = 0;
+
+    toast({ title: "Uploading...", description: `0/${totalFiles} photos` });
+
+    for (const file of Array.from(files)) {
+      const ext = file.name.split(".").pop();
+      const path = `${uploadingEventId}/${crypto.randomUUID()}.${ext}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from("event-photos")
+        .upload(path, file);
+
+      if (uploadError) {
+        toast({ title: "Upload failed", description: uploadError.message, variant: "destructive" });
+        continue;
+      }
+
+      const { data: urlData } = supabase.storage.from("event-photos").getPublicUrl(path);
+
+      await supabase.from("photos").insert({
+        event_id: uploadingEventId,
+        image_url: urlData.publicUrl,
+      });
+
+      uploaded++;
+    }
+
+    toast({ title: "Upload Complete!", description: `${uploaded}/${totalFiles} photos uploaded` });
+    setUploadingEventId(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    fetchEvents(user.id);
+  };
+
+  const totalPhotos = Object.values(photoCountMap).reduce((a, b) => a + b, 0);
 
   const stats = [
-    { label: "Total Events", value: "3", icon: Calendar },
-    { label: "Total Photos", value: "1,880", icon: Image },
-    { label: "Total Guests", value: "522", icon: Users },
-    { label: "Downloads", value: "3,412", icon: BarChart3 },
+    { label: "Total Events", value: String(events.length), icon: Calendar },
+    { label: "Total Photos", value: String(totalPhotos), icon: Image },
+    { label: "Total Guests", value: "—", icon: Users },
+    { label: "Downloads", value: "—", icon: BarChart3 },
   ];
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-gradient-dark">
+        <Navbar />
+        <div className="container pt-32 flex flex-col items-center text-center">
+          <LogIn className="w-12 h-12 text-muted-foreground mb-4" />
+          <h2 className="font-display font-bold text-2xl mb-2">Sign in to continue</h2>
+          <p className="text-muted-foreground mb-6">You need to be logged in to manage events</p>
+          <Button variant="hero" onClick={() => navigate("/login")}>Sign In</Button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-dark">
       <Navbar />
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={handlePhotoUpload}
+      />
       <div className="container pt-20 pb-16">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8 pt-4">
           <div>
@@ -74,7 +228,9 @@ const Admin = () => {
                 </div>
               </div>
               <div className="flex gap-3">
-                <Button variant="hero" size="default">Create Event</Button>
+                <Button variant="hero" size="default" onClick={handleCreateEvent} disabled={creating}>
+                  {creating ? "Creating..." : "Create Event"}
+                </Button>
                 <Button variant="ghost" size="default" onClick={() => setShowCreate(false)}>Cancel</Button>
               </div>
             </div>
@@ -114,11 +270,55 @@ const Admin = () => {
         </div>
 
         {tab === "events" && (
-          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {mockEvents.map((event) => (
-              <EventCard key={event.id} {...event} />
-            ))}
-          </div>
+          <>
+            {loading ? (
+              <div className="text-center py-12 text-muted-foreground">Loading events...</div>
+            ) : events.length === 0 ? (
+              <div className="text-center py-12">
+                <Calendar className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
+                <h3 className="font-display font-semibold text-lg mb-2">No events yet</h3>
+                <p className="text-muted-foreground text-sm mb-4">Create your first event to get started</p>
+                <Button variant="hero" onClick={() => setShowCreate(true)}>
+                  <Plus className="w-4 h-4" /> Create Event
+                </Button>
+              </div>
+            ) : (
+              <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {events.map((event) => (
+                  <div key={event.id} className="relative group">
+                    <EventCard
+                      id={event.id}
+                      name={event.name}
+                      date={event.date || event.created_at}
+                      coverImage={event.cover_image || undefined}
+                      guestCount={0}
+                      photoCount={photoCountMap[event.id] || 0}
+                      eventCode={event.event_code}
+                    />
+                    <div className="absolute top-3 left-3 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button
+                        onClick={() => {
+                          setUploadingEventId(event.id);
+                          fileInputRef.current?.click();
+                        }}
+                        className="p-2 bg-primary rounded-lg text-primary-foreground hover:bg-primary/80 transition-colors"
+                        title="Upload photos"
+                      >
+                        <Upload className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => handleDeleteEvent(event.id)}
+                        className="p-2 bg-destructive rounded-lg text-destructive-foreground hover:bg-destructive/80 transition-colors"
+                        title="Delete event"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
         )}
 
         {tab === "analytics" && (
