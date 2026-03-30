@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { LogIn, ArrowRight, Eye, EyeOff } from "lucide-react";
@@ -8,6 +8,7 @@ import Navbar from "@/components/Navbar";
 import OwlLogo from "@/components/OwlLogo";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
+import { useAuth } from "@/contexts/AuthContext";
 
 type AuthMode = "login" | "register";
 
@@ -19,6 +20,14 @@ const Login = () => {
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+  const { user, role } = useAuth();
+
+  // Redirect if already logged in
+  useEffect(() => {
+    if (user && role) {
+      navigate(role === "admin" ? "/admin" : "/", { replace: true });
+    }
+  }, [user, role, navigate]);
 
   const handleSubmit = async () => {
     if (!email || !password) {
@@ -31,7 +40,10 @@ const Login = () => {
       const { error } = await supabase.auth.signUp({
         email,
         password,
-        options: { data: { display_name: name || email } },
+        options: {
+          data: { display_name: name || email },
+          emailRedirectTo: window.location.origin,
+        },
       });
       if (error) {
         toast({ title: "Error", description: error.message, variant: "destructive" });
@@ -44,7 +56,7 @@ const Login = () => {
         toast({ title: "Error", description: error.message, variant: "destructive" });
       } else {
         toast({ title: "Welcome back!" });
-        navigate("/admin");
+        // onAuthStateChange will handle the redirect
       }
     }
     setLoading(false);
@@ -64,7 +76,6 @@ const Login = () => {
           </div>
 
           <div className="bg-gradient-card border border-border rounded-2xl p-8 shadow-card">
-            {/* Tab switcher */}
             <div className="flex bg-secondary rounded-xl p-1 mb-6">
               {(["login", "register"] as AuthMode[]).map((m) => (
                 <button
@@ -81,23 +92,12 @@ const Login = () => {
               {mode === "register" && (
                 <div>
                   <label className="text-sm font-display font-medium text-foreground mb-1.5 block">Full Name</label>
-                  <Input
-                    placeholder="John Doe"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    className="bg-secondary border-border text-foreground h-11"
-                  />
+                  <Input placeholder="John Doe" value={name} onChange={(e) => setName(e.target.value)} className="bg-secondary border-border text-foreground h-11" />
                 </div>
               )}
               <div>
                 <label className="text-sm font-display font-medium text-foreground mb-1.5 block">Email</label>
-                <Input
-                  type="email"
-                  placeholder="you@email.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="bg-secondary border-border text-foreground h-11"
-                />
+                <Input type="email" placeholder="you@email.com" value={email} onChange={(e) => setEmail(e.target.value)} className="bg-secondary border-border text-foreground h-11" />
               </div>
               <div>
                 <label className="text-sm font-display font-medium text-foreground mb-1.5 block">Password</label>
@@ -110,11 +110,7 @@ const Login = () => {
                     className="bg-secondary border-border text-foreground h-11 pr-10"
                     onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
                   />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                  >
+                  <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
                     {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
                 </div>

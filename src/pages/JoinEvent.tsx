@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { QrCode, ArrowRight, Camera } from "lucide-react";
+import { QrCode, ArrowRight, Camera, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import Navbar from "@/components/Navbar";
@@ -11,16 +11,27 @@ import { toast } from "@/hooks/use-toast";
 const JoinEvent = () => {
   const [eventCode, setEventCode] = useState("");
   const [loading, setLoading] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const navigate = useNavigate();
 
-  const handleJoin = async () => {
-    const code = eventCode.trim();
-    if (!code) return;
+  // Check URL for event_id param (from QR scan redirect)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+    if (code) {
+      setEventCode(code);
+      handleJoinWithCode(code);
+    }
+  }, []);
 
+  const handleJoinWithCode = async (code: string) => {
     setLoading(true);
     const { data, error } = await supabase
       .from("events")
-      .select("id, event_code")
+      .select("id, event_code, status")
       .eq("event_code", code)
       .maybeSingle();
 
@@ -30,18 +41,91 @@ const JoinEvent = () => {
       return;
     }
 
-    navigate(`/event/${data.event_code}`);
+    if ((data as any).status !== "approved") {
+      toast({ title: "Event not available", description: "This event has not been approved yet", variant: "destructive" });
+      setLoading(false);
+      return;
+    }
+
+    navigate(`/event/${(data as any).event_code}`);
   };
+
+  const handleJoin = () => {
+    const code = eventCode.trim();
+    if (!code) return;
+    handleJoinWithCode(code);
+  };
+
+  const startScanning = async () => {
+    setScanning(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play();
+        scanFrame();
+      }
+    } catch {
+      toast({ title: "Camera error", description: "Could not access camera", variant: "destructive" });
+      setScanning(false);
+    }
+  };
+
+  const stopScanning = () => {
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
+    setScanning(false);
+  };
+
+  const scanFrame = () => {
+    if (!videoRef.current || !canvasRef.current) return;
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const check = () => {
+      if (!streamRef.current) return;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0);
+
+      // Try to detect QR using BarcodeDetector if available
+      if ("BarcodeDetector" in window) {
+        const detector = new (window as any).BarcodeDetector({ formats: ["qr_code"] });
+        detector.detect(canvas).then((barcodes: any[]) => {
+          if (barcodes.length > 0) {
+            const url = barcodes[0].rawValue;
+            stopScanning();
+            // Extract event code from URL
+            const match = url.match(/\/event\/([A-Z0-9]+)/i);
+            if (match) {
+              handleJoinWithCode(match[1]);
+            } else {
+              // Maybe it's just a code
+              handleJoinWithCode(url);
+            }
+            return;
+          }
+          requestAnimationFrame(check);
+        }).catch(() => requestAnimationFrame(check));
+      } else {
+        requestAnimationFrame(check);
+      }
+    };
+    requestAnimationFrame(check);
+  };
+
+  useEffect(() => {
+    return () => { stopScanning(); };
+  }, []);
 
   return (
     <div className="min-h-screen bg-gradient-dark">
       <Navbar />
       <div className="container pt-24 pb-16 flex flex-col items-center">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="w-full max-w-md"
-        >
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="w-full max-w-md">
           <div className="text-center mb-10">
             <div className="w-16 h-16 bg-primary/10 rounded-2xl flex items-center justify-center mx-auto mb-6">
               <QrCode className="w-8 h-8 text-primary" />
@@ -63,23 +147,34 @@ const JoinEvent = () => {
             </div>
 
             <Button variant="hero" size="lg" className="w-full" onClick={handleJoin} disabled={!eventCode.trim() || loading}>
-              {loading ? "Joining..." : "Join Event"}
-              {!loading && <ArrowRight className="w-5 h-5" />}
+              {loading ? <><Loader2 className="w-4 h-4 animate-spin" /> Joining...</> : <>Join Event <ArrowRight className="w-5 h-5" /></>}
             </Button>
 
             <div className="relative">
-              <div className="absolute inset-0 flex items-center">
-                <div className="w-full border-t border-border" />
-              </div>
-              <div className="relative flex justify-center text-xs">
-                <span className="bg-card px-3 text-muted-foreground font-display">or</span>
-              </div>
+              <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-border" /></div>
+              <div className="relative flex justify-center text-xs"><span className="bg-card px-3 text-muted-foreground font-display">or</span></div>
             </div>
 
-            <Button variant="glass" size="lg" className="w-full">
-              <Camera className="w-5 h-5" />
-              Scan QR Code
-            </Button>
+            {!scanning ? (
+              <Button variant="glass" size="lg" className="w-full" onClick={startScanning}>
+                <Camera className="w-5 h-5" />
+                Scan QR Code
+              </Button>
+            ) : (
+              <div className="space-y-4">
+                <div className="relative rounded-xl overflow-hidden bg-secondary aspect-square">
+                  <video ref={videoRef} className="w-full h-full object-cover" playsInline muted />
+                  <canvas ref={canvasRef} className="hidden" />
+                  <div className="absolute inset-0 border-2 border-primary/50 rounded-xl pointer-events-none" />
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <div className="w-48 h-48 border-2 border-primary rounded-lg" />
+                  </div>
+                </div>
+                <Button variant="ghost" size="sm" className="w-full" onClick={stopScanning}>
+                  Stop Scanning
+                </Button>
+              </div>
+            )}
           </div>
         </motion.div>
       </div>

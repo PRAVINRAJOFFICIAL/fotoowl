@@ -23,6 +23,9 @@ export type Database = {
           event_code: string
           id: string
           name: string
+          payment_status: string
+          selected_plan: string
+          status: string
         }
         Insert: {
           cover_image?: string | null
@@ -32,6 +35,9 @@ export type Database = {
           event_code: string
           id?: string
           name: string
+          payment_status?: string
+          selected_plan?: string
+          status?: string
         }
         Update: {
           cover_image?: string | null
@@ -41,6 +47,9 @@ export type Database = {
           event_code?: string
           id?: string
           name?: string
+          payment_status?: string
+          selected_plan?: string
+          status?: string
         }
         Relationships: []
       }
@@ -108,18 +117,21 @@ export type Database = {
           display_name: string | null
           id: string
           phone: string | null
+          role: string
         }
         Insert: {
           created_at?: string
           display_name?: string | null
           id: string
           phone?: string | null
+          role?: string
         }
         Update: {
           created_at?: string
           display_name?: string | null
           id?: string
           phone?: string | null
+          role?: string
         }
         Relationships: []
       }
@@ -128,7 +140,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      is_admin: { Args: { _user_id: string }; Returns: boolean }
     }
     Enums: {
       [_ in never]: never
