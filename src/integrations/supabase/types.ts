@@ -82,6 +82,76 @@ export type Database = {
           },
         ]
       }
+      notifications: {
+        Row: {
+          created_at: string
+          event_id: string
+          id: string
+          message: string
+          read: boolean
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          event_id: string
+          id?: string
+          message: string
+          read?: boolean
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          event_id?: string
+          id?: string
+          message?: string
+          read?: boolean
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "notifications_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      photo_requests: {
+        Row: {
+          created_at: string
+          event_id: string
+          face_descriptor: number[]
+          id: string
+          notified: boolean
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          event_id: string
+          face_descriptor: number[]
+          id?: string
+          notified?: boolean
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          event_id?: string
+          face_descriptor?: number[]
+          id?: string
+          notified?: boolean
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "photo_requests_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       photos: {
         Row: {
           created_at: string
