@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import {
-  Plus, Upload, Users, Image, BarChart3, Calendar, Trash2, Brain, CheckCircle, XCircle, Clock, CreditCard
+  Plus, Upload, Image, Calendar, Trash2, Brain, CheckCircle, XCircle, Clock, CreditCard
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,7 +10,8 @@ import EventCard from "@/components/EventCard";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
 import { useNavigate } from "react-router-dom";
-import { detectFaces } from "@/lib/faceRecognition";
+import { detectFacesBatch } from "@/lib/faceRecognition";
+import { matchFaces } from "@/lib/faceRecognition";
 import { useAuth } from "@/contexts/AuthContext";
 import { QRCodeSVG } from "qrcode.react";
 
@@ -61,9 +62,7 @@ const Admin = () => {
 
   useEffect(() => {
     if (user) {
-      if (isAdmin) {
-        fetchAllPendingEvents();
-      }
+      if (isAdmin) fetchAllPendingEvents();
       fetchEvents(user.id);
     } else {
       setLoading(false);
@@ -157,7 +156,7 @@ const Admin = () => {
   };
 
   const handleReject = async (eventId: string) => {
-    const { error } = await supabase.from("events").update({ status: "rejected", payment_status: "rejected" }).eq("id", eventId);
+    const { error } = await supabase.from("events").update({ status: "rejected", payment_status: "failed" }).eq("id", eventId);
     if (error) {
       toast({ title: "Error", description: error.message, variant: "destructive" });
     } else {
@@ -176,11 +175,38 @@ const Admin = () => {
     }
   };
 
+  // Auto-match new uploads against stored photo_requests
+  const autoMatchRequests = async (eventId: string, newPhotoDescriptors: { photo_id: string; descriptor: number[] }[]) => {
+    if (newPhotoDescriptors.length === 0) return;
+
+    const { data: requests } = await supabase
+      .from("photo_requests")
+      .select("*")
+      .eq("event_id", eventId)
+      .eq("notified", false);
+
+    if (!requests || requests.length === 0) return;
+
+    for (const req of requests) {
+      const selfieDesc = new Float32Array(req.face_descriptor as number[]);
+      const matched = matchFaces(selfieDesc, newPhotoDescriptors, 0.55, 0.6);
+      if (matched.length > 0) {
+        // Create notification
+        await supabase.from("notifications").insert({
+          user_id: req.user_id,
+          event_id: eventId,
+          message: `🎉 New photos of you are available! We found ${matched.length} new photo(s).`,
+        });
+        // Mark as notified
+        await supabase.from("photo_requests").update({ notified: true }).eq("id", req.id);
+      }
+    }
+  };
+
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || !uploadingEventId) return;
 
-    // Check plan limit
     const ev = events.find(x => x.id === uploadingEventId);
     const plan = PLANS.find(p => p.id === ev?.selected_plan);
     const currentCount = photoCountMap[uploadingEventId] || 0;
@@ -192,44 +218,54 @@ const Admin = () => {
 
     const totalFiles = files.length;
     let uploaded = 0;
-    let facesDetected = 0;
+    let totalFaces = 0;
+    const allNewDescriptors: { photo_id: string; descriptor: number[] }[] = [];
 
     setUploadProgress(`Uploading 0/${totalFiles}...`);
 
+    // Upload files first
+    const uploadedPhotos: { id: string; url: string }[] = [];
     for (const file of Array.from(files)) {
       const ext = file.name.split(".").pop();
       const path = `${uploadingEventId}/${crypto.randomUUID()}.${ext}`;
-
       const { error: uploadError } = await supabase.storage.from("event-photos").upload(path, file);
       if (uploadError) { console.error("Upload error:", uploadError.message); continue; }
 
       const { data: urlData } = supabase.storage.from("event-photos").getPublicUrl(path);
-      const imageUrl = urlData.publicUrl;
-
       const { data: photoRow, error: insertErr } = await supabase
         .from("photos")
-        .insert({ event_id: uploadingEventId, image_url: imageUrl })
+        .insert({ event_id: uploadingEventId, image_url: urlData.publicUrl })
         .select("id")
         .single();
 
-      if (insertErr || !photoRow) { console.error("Photo insert error:", insertErr?.message); continue; }
-
+      if (insertErr || !photoRow) continue;
+      uploadedPhotos.push({ id: photoRow.id, url: urlData.publicUrl });
       uploaded++;
-      setUploadProgress(`Uploading ${uploaded}/${totalFiles} — Detecting faces...`);
+      setUploadProgress(`Uploaded ${uploaded}/${totalFiles} — Detecting faces...`);
+    }
 
-      try {
-        const descriptors = await detectFaces(imageUrl);
-        for (const desc of descriptors) {
-          await supabase.from("faces").insert({ photo_id: photoRow.id, descriptor: Array.from(desc) });
-          facesDetected++;
-        }
-      } catch (err) {
-        console.warn("Face detection failed for a photo, skipping:", err);
+    // Batch face detection
+    const urls = uploadedPhotos.map(p => p.url);
+    const batchResults = await detectFacesBatch(urls, 3, (done, total) => {
+      setUploadProgress(`Detecting faces: ${done}/${total} photos processed`);
+    });
+
+    for (const result of batchResults) {
+      const photo = uploadedPhotos.find(p => p.url === result.url);
+      if (!photo) continue;
+      for (const desc of result.descriptors) {
+        const descArray = Array.from(desc);
+        await supabase.from("faces").insert({ photo_id: photo.id, descriptor: descArray });
+        allNewDescriptors.push({ photo_id: photo.id, descriptor: descArray });
+        totalFaces++;
       }
     }
 
+    // Auto-match against pending requests
+    await autoMatchRequests(uploadingEventId, allNewDescriptors);
+
     setUploadProgress(null);
-    toast({ title: "Upload Complete!", description: `${uploaded}/${totalFiles} photos uploaded, ${facesDetected} faces detected` });
+    toast({ title: "Upload Complete!", description: `${uploaded}/${totalFiles} photos uploaded, ${totalFaces} faces detected` });
     setUploadingEventId(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
     fetchEvents(user!.id);
@@ -273,7 +309,6 @@ const Admin = () => {
           </Button>
         </div>
 
-        {/* Upload progress banner */}
         {uploadProgress && (
           <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="mb-6 bg-primary/10 border border-primary/20 rounded-xl p-4 flex items-center gap-3">
             <Brain className="w-5 h-5 text-primary animate-pulse" />
@@ -281,7 +316,6 @@ const Admin = () => {
           </motion.div>
         )}
 
-        {/* Create Event Form with Plan Selection */}
         {showCreate && !showPayment && (
           <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} className="mb-8 overflow-hidden">
             <div className="bg-gradient-card border border-border rounded-2xl p-6 shadow-card">
@@ -297,7 +331,6 @@ const Admin = () => {
                 </div>
               </div>
 
-              {/* Plan Selection */}
               <h4 className="font-display font-medium text-foreground mb-3">Select a Plan</h4>
               <div className="grid md:grid-cols-3 gap-4 mb-6">
                 {PLANS.map((plan) => (
@@ -331,7 +364,6 @@ const Admin = () => {
           </motion.div>
         )}
 
-        {/* Payment Screen */}
         {showPayment && creatingEventData && (
           <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} className="mb-8 overflow-hidden">
             <div className="bg-gradient-card border border-border rounded-2xl p-6 shadow-card max-w-md mx-auto text-center">
@@ -353,14 +385,13 @@ const Admin = () => {
               <Button variant="hero" size="lg" className="w-full" onClick={handleIPaid} disabled={creating}>
                 {creating ? "Creating Event..." : "✅ I Paid"}
               </Button>
-              <Button variant="ghost" size="sm" className="w-full mt-2" onClick={() => { setShowPayment(false); }}>
+              <Button variant="ghost" size="sm" className="w-full mt-2" onClick={() => setShowPayment(false)}>
                 Back
               </Button>
             </div>
           </motion.div>
         )}
 
-        {/* Stats */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
           {stats.map((s, i) => (
             <motion.div key={s.label} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }} className="bg-gradient-card border border-border rounded-xl p-5 shadow-card">
@@ -373,7 +404,6 @@ const Admin = () => {
           ))}
         </div>
 
-        {/* Tabs */}
         <div className="flex bg-secondary rounded-xl p-1 mb-8 max-w-xs">
           {(isAdmin ? ["events", "approvals"] as AdminTab[] : ["events"] as AdminTab[]).map((t) => (
             <button
@@ -401,7 +431,6 @@ const Admin = () => {
               <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
                 {events.map((event) => (
                   <div key={event.id} className="relative group">
-                    {/* Status overlay */}
                     {event.status === "pending" && (
                       <div className="absolute inset-0 z-10 bg-background/70 backdrop-blur-sm rounded-2xl flex flex-col items-center justify-center">
                         <Clock className="w-8 h-8 text-yellow-400 mb-2" />
@@ -445,7 +474,6 @@ const Admin = () => {
           </>
         )}
 
-        {/* Admin Approvals Tab */}
         {tab === "approvals" && isAdmin && (
           <div className="space-y-4">
             {pendingEvents.length === 0 ? (
