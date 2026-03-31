@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Menu, X, LogIn, LogOut } from "lucide-react";
+import { Menu, X, LogIn, LogOut, Bell } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import OwlLogo from "./OwlLogo";
 import { useAuth } from "@/contexts/AuthContext";
@@ -9,13 +9,45 @@ import { toast } from "@/hooks/use-toast";
 
 const Navbar = () => {
   const [open, setOpen] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
   const navigate = useNavigate();
   const { user, isAdmin } = useAuth();
+
+  useEffect(() => {
+    if (!user) return;
+    const fetchNotifications = async () => {
+      const { count } = await supabase
+        .from("notifications")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", user.id)
+        .eq("read", false);
+      setUnreadCount(count || 0);
+    };
+    fetchNotifications();
+
+    // Subscribe to new notifications
+    const channel = supabase
+      .channel("notifications")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "notifications", filter: `user_id=eq.${user.id}` }, () => {
+        fetchNotifications();
+        toast({ title: "🎉 New photos of you are available!" });
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [user]);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
     toast({ title: "Signed out" });
     navigate("/");
+  };
+
+  const handleNotificationClick = async () => {
+    if (unreadCount > 0 && user) {
+      await supabase.from("notifications").update({ read: true }).eq("user_id", user.id).eq("read", false);
+      setUnreadCount(0);
+    }
   };
 
   return (
@@ -28,8 +60,20 @@ const Navbar = () => {
         {/* Desktop */}
         <div className="hidden md:flex items-center gap-6">
           <Link to="/join" className="text-sm text-muted-foreground hover:text-foreground transition-colors font-display">Join Event</Link>
-          {isAdmin && (
-            <Link to="/admin" className="text-sm text-muted-foreground hover:text-foreground transition-colors font-display">Admin</Link>
+          {user && (
+            <Link to="/admin" className="text-sm text-muted-foreground hover:text-foreground transition-colors font-display">
+              {isAdmin ? "Admin" : "My Events"}
+            </Link>
+          )}
+          {user && (
+            <button onClick={handleNotificationClick} className="relative text-muted-foreground hover:text-foreground transition-colors">
+              <Bell className="w-5 h-5" />
+              {unreadCount > 0 && (
+                <span className="absolute -top-1 -right-1 w-4 h-4 bg-primary text-primary-foreground text-[10px] font-bold rounded-full flex items-center justify-center">
+                  {unreadCount}
+                </span>
+              )}
+            </button>
           )}
           {user ? (
             <Button variant="glass" size="sm" onClick={handleLogout}>
@@ -54,8 +98,10 @@ const Navbar = () => {
       {open && (
         <div className="md:hidden bg-background border-b border-border px-6 pb-6 space-y-4">
           <Link to="/join" onClick={() => setOpen(false)} className="block text-sm text-muted-foreground hover:text-foreground font-display">Join Event</Link>
-          {isAdmin && (
-            <Link to="/admin" onClick={() => setOpen(false)} className="block text-sm text-muted-foreground hover:text-foreground font-display">Admin</Link>
+          {user && (
+            <Link to="/admin" onClick={() => setOpen(false)} className="block text-sm text-muted-foreground hover:text-foreground font-display">
+              {isAdmin ? "Admin" : "My Events"}
+            </Link>
           )}
           {user ? (
             <Button variant="glass" size="sm" className="w-full" onClick={() => { handleLogout(); setOpen(false); }}>
