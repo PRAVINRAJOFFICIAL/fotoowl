@@ -145,8 +145,8 @@ export function euclideanDistance(a: Float32Array | number[], b: Float32Array | 
 export function matchFaces(
   selfieDescriptor: Float32Array,
   storedFaces: { photo_id: string; descriptor: number[] }[],
-  threshold: number = 0.55,
-  fallbackThreshold: number = 0.6
+  threshold: number = 0.6,
+  fallbackThreshold: number = 0.65
 ): string[] {
   const matchedPhotoIds = new Set<string>();
 
