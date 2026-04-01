@@ -142,19 +142,20 @@ const EventPage = () => {
 
     try {
       setSearchStatus("Detecting your face...");
-      const selfieDescriptor = await detectSelfie(selfiePreview);
+      const selfieResult = await detectSelfie(selfiePreview);
 
-      if (!selfieDescriptor) {
+      if (!selfieResult) {
         setNoFaceFound(true);
         setIsSearching(false);
         setSearchStatus("");
-        toast({ title: "No face detected ⚠️", description: "Please upload a clear selfie with exactly one face visible", variant: "destructive" });
+        toast({ title: "Use a clear front face ⚠️", description: "Please upload a clear selfie with exactly one face, looking straight at the camera", variant: "destructive" });
         return;
       }
 
+      const selfieDescriptor = selfieResult.descriptor;
+      console.log(`Selfie confidence: ${selfieResult.confidence.toFixed(3)}`);
       setLastDescriptor(selfieDescriptor);
       setSearchStatus("Scanning photos with AI...");
-
       const photoIds = allPhotos.map((p) => p.id);
       if (photoIds.length === 0) {
         setMatchedPhotos([]);
