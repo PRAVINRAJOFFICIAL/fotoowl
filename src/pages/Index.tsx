@@ -43,7 +43,7 @@ const Index = () => {
               Find My Photos
               <ArrowRight className="w-5 h-5" />
             </Button>
-            <Button variant="glass" size="xl" onClick={() => navigate(user ? "/admin" : "/login")}>
+            <Button variant="glass" size="xl" onClick={() => navigate(user ? "/create-event" : "/login")}>
               I am Event Management
             </Button>
           </motion.div>
