@@ -183,11 +183,13 @@ const EventPage = () => {
       console.log(`Faces stored: ${allFaces.length}`);
       setSearchStatus("AI is finding your photos...");
       
-      // Updated thresholds: 0.6 primary, 0.65 fallback
-      const matchedIds = matchFaces(selfieDescriptor, allFaces, 0.6, 0.65);
+      // Strict threshold: 0.5, max 50 results, sorted by accuracy
+      const matchedIds = matchFaces(selfieDescriptor, allFaces, 0.5, 50);
       console.log(`Matches found: ${matchedIds.length}`);
       
-      const matched = allPhotos.filter((p) => matchedIds.includes(p.id));
+      // Preserve sort order from matchFaces (best matches first)
+      const matchedMap = new Map(allPhotos.map((p) => [p.id, p]));
+      const matched = matchedIds.map((id) => matchedMap.get(id)).filter(Boolean) as PhotoRow[];
       setMatchedPhotos(matched);
       setViewMode("results");
 
