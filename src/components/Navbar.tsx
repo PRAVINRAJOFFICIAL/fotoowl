@@ -7,28 +7,39 @@ import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
 
+interface NotificationRow {
+  id: string;
+  event_id: string;
+  message: string;
+}
+
 const Navbar = () => {
   const [open, setOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [latestNotification, setLatestNotification] = useState<NotificationRow | null>(null);
   const navigate = useNavigate();
   const { user, isAdmin } = useAuth();
 
   useEffect(() => {
     if (!user) return;
     const fetchNotifications = async () => {
-      const { count } = await supabase
+      const { data, count } = await supabase
         .from("notifications")
-        .select("*", { count: "exact", head: true })
+        .select("id, event_id, message", { count: "exact" })
         .eq("user_id", user.id)
-        .eq("read", false);
+        .eq("read", false)
+        .order("created_at", { ascending: false })
+        .limit(1);
       setUnreadCount(count || 0);
+      if (data && data.length > 0) {
+        setLatestNotification(data[0] as NotificationRow);
+      }
     };
     fetchNotifications();
 
-    // Subscribe to new notifications
     const channel = supabase
       .channel("notifications")
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "notifications", filter: `user_id=eq.${user.id}` }, () => {
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "notifications", filter: `user_id=eq.${user.id}` }, (payload) => {
         fetchNotifications();
         toast({ title: "🎉 New photos of you are available!" });
       })
@@ -44,9 +55,13 @@ const Navbar = () => {
   };
 
   const handleNotificationClick = async () => {
-    if (unreadCount > 0 && user) {
+    if (!user) return;
+    if (unreadCount > 0 && latestNotification) {
+      // Mark all as read
       await supabase.from("notifications").update({ read: true }).eq("user_id", user.id).eq("read", false);
       setUnreadCount(0);
+      // Navigate to the event from the latest notification
+      navigate(`/event/${latestNotification.event_id}`);
     }
   };
 
@@ -60,9 +75,14 @@ const Navbar = () => {
         {/* Desktop */}
         <div className="hidden md:flex items-center gap-6">
           <Link to="/join" className="text-sm text-muted-foreground hover:text-foreground transition-colors font-display">Join Event</Link>
-          {user && (
+          {user && !isAdmin && (
+            <Link to="/my-events" className="text-sm text-muted-foreground hover:text-foreground transition-colors font-display">
+              My Events
+            </Link>
+          )}
+          {isAdmin && (
             <Link to="/admin" className="text-sm text-muted-foreground hover:text-foreground transition-colors font-display">
-              {isAdmin ? "Admin" : "My Events"}
+              Admin
             </Link>
           )}
           {user && (
@@ -98,9 +118,14 @@ const Navbar = () => {
       {open && (
         <div className="md:hidden bg-background border-b border-border px-6 pb-6 space-y-4">
           <Link to="/join" onClick={() => setOpen(false)} className="block text-sm text-muted-foreground hover:text-foreground font-display">Join Event</Link>
-          {user && (
+          {user && !isAdmin && (
+            <Link to="/my-events" onClick={() => setOpen(false)} className="block text-sm text-muted-foreground hover:text-foreground font-display">
+              My Events
+            </Link>
+          )}
+          {isAdmin && (
             <Link to="/admin" onClick={() => setOpen(false)} className="block text-sm text-muted-foreground hover:text-foreground font-display">
-              {isAdmin ? "Admin" : "My Events"}
+              Admin
             </Link>
           )}
           {user ? (

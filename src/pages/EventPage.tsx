@@ -13,7 +13,7 @@ import { saveAs } from "file-saver";
 import { detectSelfie, matchFaces, loadFaceModels } from "@/lib/faceRecognition";
 import { useAuth } from "@/contexts/AuthContext";
 
-type ViewMode = "prompt" | "selfie" | "results";
+type ViewMode = "prompt" | "selfie" | "results" | "admin-gallery";
 
 interface PhotoRow {
   id: string;
@@ -32,7 +32,7 @@ interface EventRow {
 
 const EventPage = () => {
   const { eventId } = useParams();
-  const { user } = useAuth();
+  const { user, isAdmin } = useAuth();
   const [viewMode, setViewMode] = useState<ViewMode>("prompt");
   const [selfiePreview, setSelfiePreview] = useState<string | null>(null);
   const [selfieFile, setSelfieFile] = useState<File | null>(null);
@@ -50,8 +50,10 @@ const EventPage = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    loadFaceModels().catch(console.error);
-  }, []);
+    if (!isAdmin) {
+      loadFaceModels().catch(console.error);
+    }
+  }, [isAdmin]);
 
   useEffect(() => {
     if (eventId) fetchEvent();
@@ -79,7 +81,7 @@ const EventPage = () => {
 
     const eventData = data as EventRow;
 
-    if (eventData.status !== "approved") {
+    if (eventData.status !== "approved" && !isAdmin) {
       toast({ title: "Event not available", description: "This event is not yet approved", variant: "destructive" });
       setEvent(null);
       setLoading(false);
@@ -94,7 +96,16 @@ const EventPage = () => {
       .eq("event_id", eventData.id)
       .order("created_at", { ascending: false });
 
-    setAllPhotos((photosData as PhotoRow[]) || []);
+    const photos = (photosData as PhotoRow[]) || [];
+    setAllPhotos(photos);
+
+    // Admin bypass: show all photos directly
+    if (isAdmin) {
+      setMatchedPhotos(photos);
+      setViewMode("admin-gallery");
+      setLoading(false);
+      return;
+    }
 
     // Check if user already has a notify request
     if (user) {
@@ -152,7 +163,7 @@ const EventPage = () => {
         return;
       }
 
-      // Fetch in batches if needed (Supabase 1000 row limit)
+      // Fetch all face descriptors in batches
       let allFaces: { photo_id: string; descriptor: number[] }[] = [];
       for (let i = 0; i < photoIds.length; i += 500) {
         const batch = photoIds.slice(i, i + 500);
@@ -168,8 +179,13 @@ const EventPage = () => {
         }
       }
 
+      console.log(`Faces stored: ${allFaces.length}`);
       setSearchStatus("AI is finding your photos...");
-      const matchedIds = matchFaces(selfieDescriptor, allFaces, 0.55, 0.6);
+      
+      // Updated thresholds: 0.6 primary, 0.65 fallback
+      const matchedIds = matchFaces(selfieDescriptor, allFaces, 0.6, 0.65);
+      console.log(`Matches found: ${matchedIds.length}`);
+      
       const matched = allPhotos.filter((p) => matchedIds.includes(p.id));
       setMatchedPhotos(matched);
       setViewMode("results");
@@ -210,15 +226,16 @@ const EventPage = () => {
   };
 
   const handleDownloadAll = async () => {
-    if (matchedPhotos.length === 0) return;
+    const photos = viewMode === "admin-gallery" ? allPhotos : matchedPhotos;
+    if (photos.length === 0) return;
     setDownloading(true);
     try {
       const zip = new JSZip();
       const folder = zip.folder(event?.name || "photos");
-      for (let i = 0; i < matchedPhotos.length; i++) {
-        const response = await fetch(matchedPhotos[i].image_url);
+      for (let i = 0; i < photos.length; i++) {
+        const response = await fetch(photos[i].image_url);
         const blob = await response.blob();
-        const ext = matchedPhotos[i].image_url.split('.').pop()?.split('?')[0] || 'jpg';
+        const ext = photos[i].image_url.split('.').pop()?.split('?')[0] || 'jpg';
         folder?.file(`photo_${i + 1}.${ext}`, blob);
       }
       const content = await zip.generateAsync({ type: "blob" });
@@ -242,6 +259,7 @@ const EventPage = () => {
   };
 
   const eventUrl = event ? `${window.location.origin}/event/${event.event_code}` : "";
+  const displayPhotos = viewMode === "admin-gallery" ? allPhotos : matchedPhotos;
 
   if (loading) {
     return (
@@ -313,7 +331,7 @@ const EventPage = () => {
           )}
         </AnimatePresence>
 
-        {/* Prompt: upload selfie first */}
+        {/* Prompt: upload selfie first (non-admin only) */}
         {viewMode === "prompt" && (
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="max-w-md mx-auto py-12">
             <div className="bg-gradient-card border border-border rounded-2xl p-8 shadow-card text-center">
@@ -395,28 +413,38 @@ const EventPage = () => {
           </motion.div>
         )}
 
-        {/* Results */}
-        {viewMode === "results" && (
+        {/* Results (user matched) or Admin gallery */}
+        {(viewMode === "results" || viewMode === "admin-gallery") && (
           <>
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mb-8">
               <div className="bg-primary/10 border border-primary/20 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 mb-6">
                 <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-full overflow-hidden border-2 border-primary flex-shrink-0">
-                    {selfiePreview && <img src={selfiePreview} alt="You" className="w-full h-full object-cover" />}
-                  </div>
-                  <span className="text-sm text-foreground font-display">
-                    {matchedPhotos.length > 0 ? (
-                      <>We found <strong className="text-primary">{matchedPhotos.length} photos</strong> of you 🎉</>
-                    ) : (
-                      <>No photos found 😢</>
-                    )}
-                  </span>
+                  {viewMode === "admin-gallery" ? (
+                    <span className="text-sm text-foreground font-display">
+                      Showing <strong className="text-primary">all {allPhotos.length} photos</strong> (Admin view)
+                    </span>
+                  ) : (
+                    <>
+                      <div className="w-10 h-10 rounded-full overflow-hidden border-2 border-primary flex-shrink-0">
+                        {selfiePreview && <img src={selfiePreview} alt="You" className="w-full h-full object-cover" />}
+                      </div>
+                      <span className="text-sm text-foreground font-display">
+                        {matchedPhotos.length > 0 ? (
+                          <>We found <strong className="text-primary">{matchedPhotos.length} photos</strong> of you 🎉</>
+                        ) : (
+                          <>No photos found 😢</>
+                        )}
+                      </span>
+                    </>
+                  )}
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Button variant="glass" size="sm" onClick={() => { setViewMode("prompt"); setSelfiePreview(null); setSelfieFile(null); setMatchedPhotos([]); setLastDescriptor(null); }}>
-                    New Search
-                  </Button>
-                  {matchedPhotos.length > 0 && (
+                  {viewMode !== "admin-gallery" && (
+                    <Button variant="glass" size="sm" onClick={() => { setViewMode("prompt"); setSelfiePreview(null); setSelfieFile(null); setMatchedPhotos([]); setLastDescriptor(null); }}>
+                      New Search
+                    </Button>
+                  )}
+                  {displayPhotos.length > 0 && (
                     <Button variant="hero" size="sm" onClick={handleDownloadAll} disabled={downloading}>
                       <Download className="w-4 h-4" />
                       {downloading ? "Zipping..." : "Download All"}
@@ -425,8 +453,8 @@ const EventPage = () => {
                 </div>
               </div>
 
-              {/* Notify Me button when no matches */}
-              {matchedPhotos.length === 0 && user && lastDescriptor && !hasNotifyRequest && (
+              {/* Notify Me button when no matches (non-admin) */}
+              {viewMode === "results" && matchedPhotos.length === 0 && user && lastDescriptor && !hasNotifyRequest && (
                 <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="bg-gradient-card border border-border rounded-xl p-6 text-center mb-6">
                   <Bell className="w-8 h-8 text-primary mx-auto mb-3" />
                   <h3 className="font-display font-semibold text-foreground mb-2">Notify me when photos are available</h3>
@@ -438,7 +466,7 @@ const EventPage = () => {
                 </motion.div>
               )}
 
-              {hasNotifyRequest && matchedPhotos.length === 0 && (
+              {hasNotifyRequest && viewMode === "results" && matchedPhotos.length === 0 && (
                 <div className="bg-primary/5 border border-primary/10 rounded-xl p-4 text-center mb-6">
                   <p className="text-sm text-muted-foreground">
                     🔔 You'll be notified when new photos of you are uploaded
@@ -447,9 +475,9 @@ const EventPage = () => {
               )}
             </motion.div>
 
-            {matchedPhotos.length > 0 && (
+            {displayPhotos.length > 0 && (
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 md:gap-4">
-                {matchedPhotos.map((photo, i) => (
+                {displayPhotos.map((photo, i) => (
                   <motion.div
                     key={photo.id}
                     initial={{ opacity: 0, scale: 0.95 }}

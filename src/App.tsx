@@ -10,6 +10,8 @@ import JoinEvent from "./pages/JoinEvent";
 import EventPage from "./pages/EventPage";
 import Login from "./pages/Login";
 import Admin from "./pages/Admin";
+import MyEvents from "./pages/MyEvents";
+import CreateEvent from "./pages/CreateEvent";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -24,12 +26,18 @@ const App = () => (
           <Routes>
             <Route path="/" element={<Index />} />
             <Route path="/join" element={<JoinEvent />} />
-            <Route path="/event/:eventId" element={
+            <Route path="/event/:eventId" element={<EventPage />} />
+            <Route path="/login" element={<Login />} />
+            <Route path="/my-events" element={
               <ProtectedRoute requireAuth>
-                <EventPage />
+                <MyEvents />
               </ProtectedRoute>
             } />
-            <Route path="/login" element={<Login />} />
+            <Route path="/create-event" element={
+              <ProtectedRoute requireAuth>
+                <CreateEvent />
+              </ProtectedRoute>
+            } />
             <Route path="/admin" element={
               <ProtectedRoute requireAdmin>
                 <Admin />
