@@ -193,7 +193,7 @@ const Admin = () => {
     setUploadProgress(`Uploading 0/${totalFiles}...`);
 
     // Upload files to Supabase storage first
-    const uploadedPhotos: { id: string; url: string; file: File }[] = [];
+    const uploadedPhotos: { id: string; url: string }[] = [];
     for (const file of Array.from(files)) {
       const ext = file.name.split(".").pop();
       const path = `${uploadingEventId}/${crypto.randomUUID()}.${ext}`;
@@ -208,28 +208,26 @@ const Admin = () => {
         .single();
 
       if (insertErr || !photoRow) continue;
-      uploadedPhotos.push({ id: photoRow.id, url: urlData.publicUrl, file });
+      uploadedPhotos.push({ id: photoRow.id, url: urlData.publicUrl });
       uploaded++;
-      setUploadProgress(`Uploaded ${uploaded}/${totalFiles}...`);
+      setUploadProgress(`Uploaded ${uploaded}/${totalFiles} — Detecting faces...`);
     }
 
-    // Send to Python API for face detection
+    // Batch face detection using face-api.js (SsdMobilenetv1)
     let totalFaces = 0;
-    if (isFaceApiConfigured() && uploadedPhotos.length > 0) {
-      try {
-        setUploadProgress("Detecting faces via AI...");
-        const result = await uploadPhotosToApi(
-          uploadedPhotos.map(p => p.file),
-          uploadedPhotos.map(p => p.id),
-          uploadingEventId
-        );
-        totalFaces = result.faces_detected || 0;
-      } catch (err) {
-        console.error("Face detection API error:", err);
-        toast({ title: "Warning", description: "Photos uploaded but face detection failed.", variant: "destructive" });
+    const urls = uploadedPhotos.map(p => p.url);
+    const batchResults = await detectFacesBatch(urls, 3, (done, total) => {
+      setUploadProgress(`Detecting faces: ${done}/${total} photos processed`);
+    });
+
+    for (const result of batchResults) {
+      const photo = uploadedPhotos.find(p => p.url === result.url);
+      if (!photo) continue;
+      for (const desc of result.descriptors) {
+        const descArray = Array.from(desc);
+        await supabase.from("faces").insert({ photo_id: photo.id, descriptor: descArray });
+        totalFaces++;
       }
-    } else if (!isFaceApiConfigured()) {
-      console.warn("VITE_FACE_API_URL not configured — skipping face detection");
     }
 
     setUploadProgress(null);
