@@ -181,12 +181,13 @@ const EventPage = () => {
   };
 
   const handleNotifyMe = async () => {
-    if (!event || !user || !lastDescriptor) return;
+    if (!event || !user || !selfieFile) return;
 
+    // Store a placeholder descriptor — actual matching happens server-side
     const { error } = await supabase.from("photo_requests").insert({
       user_id: user.id,
       event_id: event.id,
-      face_descriptor: Array.from(lastDescriptor),
+      face_descriptor: [0], // placeholder, Python API handles matching
     });
 
     if (error) {
