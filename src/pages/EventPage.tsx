@@ -10,7 +10,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
-import { detectSelfie, matchFaces, loadFaceModels } from "@/lib/faceRecognition";
+import { matchSelfieViaApi, isFaceApiConfigured } from "@/lib/faceApi";
 import { useAuth } from "@/contexts/AuthContext";
 
 type ViewMode = "prompt" | "selfie" | "results" | "admin-gallery";
