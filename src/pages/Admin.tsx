@@ -174,34 +174,6 @@ const Admin = () => {
     }
   };
 
-  // Auto-match new uploads against stored photo_requests
-  const autoMatchRequests = async (eventId: string, newPhotoDescriptors: { photo_id: string; descriptor: number[] }[]) => {
-    if (newPhotoDescriptors.length === 0) return;
-
-    const { data: requests } = await supabase
-      .from("photo_requests")
-      .select("*")
-      .eq("event_id", eventId)
-      .eq("notified", false);
-
-    if (!requests || requests.length === 0) return;
-
-    for (const req of requests) {
-      const selfieDesc = new Float32Array(req.face_descriptor as number[]);
-      const matched = matchFaces(selfieDesc, newPhotoDescriptors, 0.55, 0.6);
-      if (matched.length > 0) {
-        // Create notification
-        await supabase.from("notifications").insert({
-          user_id: req.user_id,
-          event_id: eventId,
-          message: `🎉 New photos of you are available! We found ${matched.length} new photo(s).`,
-        });
-        // Mark as notified
-        await supabase.from("photo_requests").update({ notified: true }).eq("id", req.id);
-      }
-    }
-  };
-
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || !uploadingEventId) return;
@@ -217,13 +189,11 @@ const Admin = () => {
 
     const totalFiles = files.length;
     let uploaded = 0;
-    let totalFaces = 0;
-    const allNewDescriptors: { photo_id: string; descriptor: number[] }[] = [];
 
     setUploadProgress(`Uploading 0/${totalFiles}...`);
 
-    // Upload files first
-    const uploadedPhotos: { id: string; url: string }[] = [];
+    // Upload files to Supabase storage first
+    const uploadedPhotos: { id: string; url: string; file: File }[] = [];
     for (const file of Array.from(files)) {
       const ext = file.name.split(".").pop();
       const path = `${uploadingEventId}/${crypto.randomUUID()}.${ext}`;
@@ -238,30 +208,29 @@ const Admin = () => {
         .single();
 
       if (insertErr || !photoRow) continue;
-      uploadedPhotos.push({ id: photoRow.id, url: urlData.publicUrl });
+      uploadedPhotos.push({ id: photoRow.id, url: urlData.publicUrl, file });
       uploaded++;
-      setUploadProgress(`Uploaded ${uploaded}/${totalFiles} — Detecting faces...`);
+      setUploadProgress(`Uploaded ${uploaded}/${totalFiles}...`);
     }
 
-    // Batch face detection
-    const urls = uploadedPhotos.map(p => p.url);
-    const batchResults = await detectFacesBatch(urls, 3, (done, total) => {
-      setUploadProgress(`Detecting faces: ${done}/${total} photos processed`);
-    });
-
-    for (const result of batchResults) {
-      const photo = uploadedPhotos.find(p => p.url === result.url);
-      if (!photo) continue;
-      for (const desc of result.descriptors) {
-        const descArray = Array.from(desc);
-        await supabase.from("faces").insert({ photo_id: photo.id, descriptor: descArray });
-        allNewDescriptors.push({ photo_id: photo.id, descriptor: descArray });
-        totalFaces++;
+    // Send to Python API for face detection
+    let totalFaces = 0;
+    if (isFaceApiConfigured() && uploadedPhotos.length > 0) {
+      try {
+        setUploadProgress("Detecting faces via AI...");
+        const result = await uploadPhotosToApi(
+          uploadedPhotos.map(p => p.file),
+          uploadedPhotos.map(p => p.id),
+          uploadingEventId
+        );
+        totalFaces = result.faces_detected || 0;
+      } catch (err) {
+        console.error("Face detection API error:", err);
+        toast({ title: "Warning", description: "Photos uploaded but face detection failed.", variant: "destructive" });
       }
+    } else if (!isFaceApiConfigured()) {
+      console.warn("VITE_FACE_API_URL not configured — skipping face detection");
     }
-
-    // Auto-match against pending requests
-    await autoMatchRequests(uploadingEventId, allNewDescriptors);
 
     setUploadProgress(null);
     toast({ title: "Upload Complete!", description: `${uploaded}/${totalFiles} photos uploaded, ${totalFaces} faces detected` });
