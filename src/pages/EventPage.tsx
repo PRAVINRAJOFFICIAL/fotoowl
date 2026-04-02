@@ -127,62 +127,42 @@ const EventPage = () => {
   };
 
   const handleFindPhotos = async () => {
-    if (!selfiePreview || !event) return;
+    if (!selfieFile || !event) return;
 
     setIsSearching(true);
     setNoFaceFound(false);
-    setSearchStatus("Loading AI models...");
 
     try {
-      setSearchStatus("Detecting your face...");
-      const selfieResult = await detectSelfie(selfiePreview);
+      if (!isFaceApiConfigured()) {
+        toast({ title: "Configuration Error", description: "Face recognition API is not configured. Contact the administrator.", variant: "destructive" });
+        setIsSearching(false);
+        return;
+      }
 
-      if (!selfieResult) {
-        setNoFaceFound(true);
+      setSearchStatus("Sending selfie to AI...");
+      const result = await matchSelfieViaApi(selfieFile, event.id);
+
+      if (!result.success) {
+        if (result.faces_detected === 0) {
+          setNoFaceFound(true);
+          toast({ title: "No face detected ⚠️", description: "Please upload a clear selfie with exactly one face, looking straight at the camera", variant: "destructive" });
+        } else {
+          toast({ title: "Error", description: result.error || "Face matching failed", variant: "destructive" });
+        }
         setIsSearching(false);
         setSearchStatus("");
-        toast({ title: "Use a clear front face ⚠️", description: "Please upload a clear selfie with exactly one face, looking straight at the camera", variant: "destructive" });
         return;
       }
 
-      const selfieDescriptor = selfieResult.descriptor;
-      console.log(`Selfie confidence: ${selfieResult.confidence.toFixed(3)}`);
-      setLastDescriptor(selfieDescriptor);
-      setSearchStatus("Scanning photos with AI...");
-      const photoIds = allPhotos.map((p) => p.id);
-      if (photoIds.length === 0) {
-        setMatchedPhotos([]);
-        setIsSearching(false);
-        setViewMode("results");
-        return;
-      }
-
-      // Fetch all face descriptors in batches
-      let allFaces: { photo_id: string; descriptor: number[] }[] = [];
-      for (let i = 0; i < photoIds.length; i += 500) {
-        const batch = photoIds.slice(i, i + 500);
-        const { data: facesData } = await supabase
-          .from("faces")
-          .select("photo_id, descriptor")
-          .in("photo_id", batch);
-        if (facesData) {
-          allFaces.push(...facesData.map((f: any) => ({
-            photo_id: f.photo_id as string,
-            descriptor: f.descriptor as number[],
-          })));
-        }
-      }
-
-      console.log(`Faces stored: ${allFaces.length}`);
-      setSearchStatus("AI is finding your photos...");
+      console.log(`Matches found: ${result.matched.length}`);
       
-      // Strict threshold: 0.5, max 50 results, sorted by accuracy
-      const matchedIds = matchFaces(selfieDescriptor, allFaces, 0.5, 50);
-      console.log(`Matches found: ${matchedIds.length}`);
-      
-      // Preserve sort order from matchFaces (best matches first)
+      // Map matched photo_ids to actual photo objects, preserving distance sort order
       const matchedMap = new Map(allPhotos.map((p) => [p.id, p]));
-      const matched = matchedIds.map((id) => matchedMap.get(id)).filter(Boolean) as PhotoRow[];
+      const matched = result.matched
+        .filter((m) => m.distance < 0.5)
+        .map((m) => matchedMap.get(m.photo_id))
+        .filter(Boolean) as PhotoRow[];
+      
       setMatchedPhotos(matched);
       setViewMode("results");
 
