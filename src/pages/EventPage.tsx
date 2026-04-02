@@ -46,14 +46,7 @@ const EventPage = () => {
   const [downloading, setDownloading] = useState(false);
   const [noFaceFound, setNoFaceFound] = useState(false);
   const [hasNotifyRequest, setHasNotifyRequest] = useState(false);
-  const [lastDescriptor, setLastDescriptor] = useState<Float32Array | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (!isAdmin) {
-      loadFaceModels().catch(console.error);
-    }
-  }, [isAdmin]);
 
   useEffect(() => {
     if (eventId) fetchEvent();
