@@ -431,7 +431,7 @@ const EventPage = () => {
               </div>
 
               {/* Notify Me button when no matches (non-admin) */}
-              {viewMode === "results" && matchedPhotos.length === 0 && user && lastDescriptor && !hasNotifyRequest && (
+              {viewMode === "results" && matchedPhotos.length === 0 && user && selfieFile && !hasNotifyRequest && (
                 <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="bg-gradient-card border border-border rounded-xl p-6 text-center mb-6">
                   <Bell className="w-8 h-8 text-primary mx-auto mb-3" />
                   <h3 className="font-display font-semibold text-foreground mb-2">Notify me when photos are available</h3>
