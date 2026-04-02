@@ -6,15 +6,20 @@ let modelsLoaded = false;
 let modelsLoading = false;
 let loadPromise: Promise<void> | null = null;
 
+/**
+ * Load SsdMobilenetv1 + landmarks + recognition for maximum accuracy.
+ */
 export async function loadFaceModels(): Promise<void> {
   if (modelsLoaded) return;
   if (modelsLoading && loadPromise) return loadPromise;
 
   modelsLoading = true;
   loadPromise = (async () => {
-    await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-    await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
-    await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+    await Promise.all([
+      faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
+      faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+      faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
+    ]);
     modelsLoaded = true;
     modelsLoading = false;
   })();
@@ -26,21 +31,18 @@ export function areModelsLoaded(): boolean {
   return modelsLoaded;
 }
 
-/**
- * Resize image to max dimension for faster processing
- */
-function resizeImage(img: HTMLImageElement, maxSize: number = 512): HTMLCanvasElement {
+// ── Image preprocessing ──
+
+function resizeImage(img: HTMLImageElement, maxSize: number = 640): HTMLCanvasElement {
   const canvas = document.createElement("canvas");
   let { width, height } = img;
-  if (width > height) {
-    if (width > maxSize) { height = (height * maxSize) / width; width = maxSize; }
-  } else {
-    if (height > maxSize) { width = (width * maxSize) / height; height = maxSize; }
-  }
+  const scale = Math.min(maxSize / Math.max(width, height), 1);
+  width = Math.round(width * scale);
+  height = Math.round(height * scale);
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d")!;
-  ctx.filter = "contrast(1.1) brightness(1.05)";
+  ctx.filter = "contrast(1.12) brightness(1.06)";
   ctx.drawImage(img, 0, 0, width, height);
   return canvas;
 }
@@ -55,9 +57,8 @@ async function loadImageElement(url: string): Promise<HTMLImageElement> {
   });
 }
 
-/**
- * Normalize a descriptor vector to unit length for consistent comparison.
- */
+// ── Descriptor math ──
+
 function normalizeDescriptor(desc: Float32Array | number[]): Float32Array {
   let sumSq = 0;
   for (let i = 0; i < desc.length; i++) {
@@ -72,28 +73,61 @@ function normalizeDescriptor(desc: Float32Array | number[]): Float32Array {
   return normalized;
 }
 
+export function euclideanDistance(a: Float32Array | number[], b: Float32Array | number[]): number {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) {
+    const diff = (a[i] || 0) - (b[i] || 0);
+    sum += diff * diff;
+  }
+  return Math.sqrt(sum);
+}
+
+/** Average multiple descriptors for more stable representation */
+export function averageDescriptors(descriptors: Float32Array[]): Float32Array {
+  if (descriptors.length === 0) return new Float32Array(128);
+  if (descriptors.length === 1) return descriptors[0];
+  const avg = new Float32Array(128);
+  for (const d of descriptors) {
+    for (let i = 0; i < 128; i++) avg[i] += d[i];
+  }
+  for (let i = 0; i < 128; i++) avg[i] /= descriptors.length;
+  return normalizeDescriptor(avg);
+}
+
+/** Convert distance to confidence percentage (0.0 → 100%, 0.6 → 0%) */
+export function distanceToConfidence(distance: number): number {
+  return Math.max(0, Math.min(100, Math.round((1 - distance / 0.6) * 100)));
+}
+
+// ── Detection ──
+
+const MIN_FACE_SIZE = 50; // px — ignore tiny faces
+
 /**
- * Detect all faces in an image with confidence filtering.
- * Returns descriptors only for high-confidence detections (>0.8 score).
+ * Detect all faces in an image using SsdMobilenetv1 (high accuracy).
+ * Filters by confidence (>0.7) and minimum face size.
  */
 export async function detectFaces(imageUrl: string): Promise<Float32Array[]> {
   await loadFaceModels();
 
   const img = await loadImageElement(imageUrl);
-  const canvas = resizeImage(img, 512);
+  const canvas = resizeImage(img, 640);
 
   const detections = await faceapi
-    .detectAllFaces(canvas, new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.5 }))
+    .detectAllFaces(canvas, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
     .withFaceLandmarks()
     .withFaceDescriptors();
 
   return detections
-    .filter((d) => d.detection.score > 0.8)
-    .map((d) => d.descriptor);
+    .filter((d) => {
+      const box = d.detection.box;
+      return d.detection.score > 0.7 && box.width >= MIN_FACE_SIZE && box.height >= MIN_FACE_SIZE;
+    })
+    .map((d) => normalizeDescriptor(d.descriptor));
 }
 
 /**
- * Process photos in batches for scalability
+ * Process photos in batches.
  */
 export async function detectFacesBatch(
   imageUrls: string[],
@@ -101,7 +135,7 @@ export async function detectFacesBatch(
   onProgress?: (done: number, total: number) => void
 ): Promise<{ url: string; descriptors: Float32Array[] }[]> {
   const results: { url: string; descriptors: Float32Array[] }[] = [];
-  
+
   for (let i = 0; i < imageUrls.length; i += batchSize) {
     const batch = imageUrls.slice(i, i + batchSize);
     const batchResults = await Promise.all(
@@ -117,98 +151,182 @@ export async function detectFacesBatch(
     results.push(...batchResults);
     onProgress?.(Math.min(i + batchSize, imageUrls.length), imageUrls.length);
   }
-  
+
   return results;
 }
 
+// ── Selfie detection ──
+
+export interface SelfieResult {
+  descriptor: Float32Array;
+  confidence: number;
+}
+
 /**
- * Detect a single face from a selfie with quality validation.
- * Returns the normalized descriptor or null if no face, multiple faces, or low quality.
+ * Detect a single face from a selfie with strict quality validation.
+ * Returns null if no face, multiple faces, low confidence, or too small.
  */
-export async function detectSelfie(imageDataUrl: string): Promise<{ descriptor: Float32Array; confidence: number } | null> {
+export async function detectSelfie(imageDataUrl: string): Promise<SelfieResult | null> {
   await loadFaceModels();
 
   const img = await loadImageElement(imageDataUrl);
-  const canvas = resizeImage(img, 512);
+  const canvas = resizeImage(img, 640);
 
   const detections = await faceapi
-    .detectAllFaces(canvas, new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.4 }))
+    .detectAllFaces(canvas, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.4 }))
     .withFaceLandmarks()
     .withFaceDescriptors();
 
   // Must have exactly one face
   if (detections.length !== 1) return null;
 
-  const detection = detections[0];
-  
-  // Require high confidence for selfie (frontal, clear face)
-  if (detection.detection.score < 0.7) return null;
+  const det = detections[0];
+
+  // Require high confidence and minimum face size
+  if (det.detection.score < 0.75) return null;
+  const box = det.detection.box;
+  if (box.width < 80 || box.height < 80) return null;
+
+  // Check face is reasonably centered (within middle 80% of image)
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+  if (cx < canvas.width * 0.1 || cx > canvas.width * 0.9 ||
+      cy < canvas.height * 0.1 || cy > canvas.height * 0.9) {
+    return null;
+  }
 
   return {
-    descriptor: normalizeDescriptor(detection.descriptor),
-    confidence: detection.detection.score,
+    descriptor: normalizeDescriptor(det.descriptor),
+    confidence: det.detection.score,
   };
 }
 
 /**
- * Calculate Euclidean distance between two normalized face descriptors.
+ * Detect selfie from multiple captures, average descriptors for stability.
+ * Returns null if any capture fails validation.
  */
-export function euclideanDistance(a: Float32Array | number[], b: Float32Array | number[]): number {
-  let sum = 0;
-  for (let i = 0; i < a.length; i++) {
-    const diff = (a[i] || 0) - (b[i] || 0);
-    sum += diff * diff;
+export async function detectMultiSelfie(imageDataUrls: string[]): Promise<{
+  averaged: Float32Array;
+  individual: SelfieResult[];
+} | null> {
+  const results: SelfieResult[] = [];
+
+  for (const url of imageDataUrls) {
+    const result = await detectSelfie(url);
+    if (!result) return null; // all must succeed
+    results.push(result);
   }
-  return Math.sqrt(sum);
+
+  if (results.length === 0) return null;
+
+  const averaged = averageDescriptors(results.map(r => r.descriptor));
+  return { averaged, individual: results };
+}
+
+// ── Matching ──
+
+export interface MatchCandidate {
+  photoId: string;
+  distance: number;
+  confidence: number;
 }
 
 /**
- * Strict face matching with normalized descriptors and best-match-per-photo logic.
- * 
- * For each photo, finds the face with the smallest distance to the selfie.
- * Only includes the photo if the best distance is below the strict threshold (0.5).
- * Re-verifies matches to eliminate false positives.
- * Returns photo IDs sorted by best match distance (most similar first).
+ * Strict face matching with:
+ * - Normalized descriptors
+ * - Best-match-per-photo
+ * - Hard negative filter (reject ambiguous top matches)
+ * - Confidence threshold (>75%)
+ * - Double validation with multiple selfie descriptors
  */
 export function matchFaces(
-  selfieDescriptor: Float32Array,
+  selfieDescriptors: Float32Array[], // multiple selfie descriptors for double validation
   storedFaces: { photo_id: string; descriptor: number[] }[],
-  threshold: number = 0.5,
+  threshold: number = 0.48,
   maxResults: number = 50
-): string[] {
-  const normalizedSelfie = normalizeDescriptor(selfieDescriptor);
+): MatchCandidate[] {
+  if (selfieDescriptors.length === 0 || storedFaces.length === 0) return [];
 
-  // Group faces by photo_id and find the best (smallest) distance per photo
-  const bestPerPhoto = new Map<string, number>();
+  // For each selfie descriptor, compute best distance per photo
+  const allPhotoScores: Map<string, number[]>[] = [];
 
-  for (const face of storedFaces) {
-    const normalizedFace = normalizeDescriptor(face.descriptor);
-    const distance = euclideanDistance(normalizedSelfie, normalizedFace);
+  for (const selfieDesc of selfieDescriptors) {
+    const normalized = normalizeDescriptor(selfieDesc);
+    const bestPerPhoto = new Map<string, number>();
 
-    const current = bestPerPhoto.get(face.photo_id);
-    if (current === undefined || distance < current) {
-      bestPerPhoto.set(face.photo_id, distance);
+    for (const face of storedFaces) {
+      const normalizedFace = normalizeDescriptor(face.descriptor);
+      const distance = euclideanDistance(normalized, normalizedFace);
+
+      const current = bestPerPhoto.get(face.photo_id);
+      if (current === undefined || distance < current) {
+        bestPerPhoto.set(face.photo_id, distance);
+      }
+    }
+
+    // Collect scores per photo across all selfie descriptors
+    const scoresMap = new Map<string, number[]>();
+    for (const [photoId, dist] of bestPerPhoto) {
+      scoresMap.set(photoId, [dist]);
+    }
+    allPhotoScores.push(scoresMap);
+  }
+
+  // Merge: for each photo, require ALL selfie descriptors to match (double validation)
+  const mergedScores = new Map<string, number[]>();
+  const allPhotoIds = new Set<string>();
+  for (const scores of allPhotoScores) {
+    for (const id of scores.keys()) allPhotoIds.add(id);
+  }
+
+  for (const photoId of allPhotoIds) {
+    const distances: number[] = [];
+    let allMatch = true;
+    for (const scores of allPhotoScores) {
+      const dists = scores.get(photoId);
+      if (!dists || dists[0] === undefined) {
+        allMatch = false;
+        break;
+      }
+      distances.push(dists[0]);
+    }
+    // Double validation: ALL selfie descriptors must match this photo
+    if (allMatch && distances.every(d => d < threshold + 0.04)) {
+      mergedScores.set(photoId, distances);
     }
   }
 
-  // Filter: only accept photos where best face distance < threshold
-  const candidates: { photoId: string; distance: number }[] = [];
-  for (const [photoId, distance] of bestPerPhoto) {
-    if (distance < threshold) {
-      candidates.push({ photoId, distance });
+  // Build candidates using average distance across selfie descriptors
+  const candidates: MatchCandidate[] = [];
+  for (const [photoId, distances] of mergedScores) {
+    const avgDist = distances.reduce((a, b) => a + b, 0) / distances.length;
+    if (avgDist < threshold) {
+      const confidence = distanceToConfidence(avgDist);
+      if (confidence >= 75) { // Only show high confidence matches
+        candidates.push({ photoId, distance: avgDist, confidence });
+      }
     }
   }
 
-  // Sort by distance (best matches first)
+  // Sort by distance (best first)
   candidates.sort((a, b) => a.distance - b.distance);
 
-  // Limit results
-  const limited = candidates.slice(0, maxResults);
-
-  console.log(`Match stats: ${storedFaces.length} faces checked, ${bestPerPhoto.size} photos evaluated, ${limited.length} matches (threshold: ${threshold})`);
-  for (const c of limited.slice(0, 5)) {
-    console.log(`  Photo ${c.photoId.slice(0, 8)}… distance: ${c.distance.toFixed(4)}`);
+  // Hard negative filter: if top 2 are from different people and very close, reject both
+  if (candidates.length >= 2) {
+    const diff = Math.abs(candidates[0].distance - candidates[1].distance);
+    if (diff < 0.02 && candidates[0].distance > 0.35) {
+      // Ambiguous — both are weak matches close together, remove the worse one
+      console.warn(`Hard negative filter: top 2 matches too close (diff=${diff.toFixed(4)}), removing weaker match`);
+      candidates.splice(1, 1);
+    }
   }
 
-  return limited.map((c) => c.photoId);
+  const limited = candidates.slice(0, maxResults);
+
+  console.log(`Match stats: ${storedFaces.length} faces, ${allPhotoIds.size} photos, ${limited.length} matches (threshold: ${threshold})`);
+  for (const c of limited.slice(0, 5)) {
+    console.log(`  Photo ${c.photoId.slice(0, 8)}… dist: ${c.distance.toFixed(4)} conf: ${c.confidence}%`);
+  }
+
+  return limited;
 }

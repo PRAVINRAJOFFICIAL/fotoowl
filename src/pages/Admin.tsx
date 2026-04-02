@@ -10,7 +10,7 @@ import EventCard from "@/components/EventCard";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
 import { useNavigate } from "react-router-dom";
-import { uploadPhotosToApi, isFaceApiConfigured } from "@/lib/faceApi";
+import { detectFacesBatch, matchFaces } from "@/lib/faceRecognition";
 import { useAuth } from "@/contexts/AuthContext";
 import { QRCodeSVG } from "qrcode.react";
 
