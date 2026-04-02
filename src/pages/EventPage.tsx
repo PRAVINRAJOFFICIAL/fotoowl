@@ -417,7 +417,7 @@ const EventPage = () => {
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {viewMode !== "admin-gallery" && (
-                    <Button variant="glass" size="sm" onClick={() => { setViewMode("prompt"); setSelfiePreview(null); setSelfieFile(null); setMatchedPhotos([]); setLastDescriptor(null); }}>
+                    <Button variant="glass" size="sm" onClick={() => { setViewMode("prompt"); setSelfiePreview(null); setSelfieFile(null); setMatchedPhotos([]); }}>
                       New Search
                     </Button>
                   )}
