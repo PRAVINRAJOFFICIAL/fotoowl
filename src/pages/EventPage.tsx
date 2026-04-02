@@ -10,7 +10,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
-import { detectSelfie, matchFaces, loadFaceModels } from "@/lib/faceRecognition";
+import { matchSelfieViaApi, isFaceApiConfigured } from "@/lib/faceApi";
 import { useAuth } from "@/contexts/AuthContext";
 
 type ViewMode = "prompt" | "selfie" | "results" | "admin-gallery";
@@ -46,14 +46,7 @@ const EventPage = () => {
   const [downloading, setDownloading] = useState(false);
   const [noFaceFound, setNoFaceFound] = useState(false);
   const [hasNotifyRequest, setHasNotifyRequest] = useState(false);
-  const [lastDescriptor, setLastDescriptor] = useState<Float32Array | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (!isAdmin) {
-      loadFaceModels().catch(console.error);
-    }
-  }, [isAdmin]);
 
   useEffect(() => {
     if (eventId) fetchEvent();
@@ -134,62 +127,42 @@ const EventPage = () => {
   };
 
   const handleFindPhotos = async () => {
-    if (!selfiePreview || !event) return;
+    if (!selfieFile || !event) return;
 
     setIsSearching(true);
     setNoFaceFound(false);
-    setSearchStatus("Loading AI models...");
 
     try {
-      setSearchStatus("Detecting your face...");
-      const selfieResult = await detectSelfie(selfiePreview);
+      if (!isFaceApiConfigured()) {
+        toast({ title: "Configuration Error", description: "Face recognition API is not configured. Contact the administrator.", variant: "destructive" });
+        setIsSearching(false);
+        return;
+      }
 
-      if (!selfieResult) {
-        setNoFaceFound(true);
+      setSearchStatus("Sending selfie to AI...");
+      const result = await matchSelfieViaApi(selfieFile, event.id);
+
+      if (!result.success) {
+        if (result.faces_detected === 0) {
+          setNoFaceFound(true);
+          toast({ title: "No face detected ⚠️", description: "Please upload a clear selfie with exactly one face, looking straight at the camera", variant: "destructive" });
+        } else {
+          toast({ title: "Error", description: result.error || "Face matching failed", variant: "destructive" });
+        }
         setIsSearching(false);
         setSearchStatus("");
-        toast({ title: "Use a clear front face ⚠️", description: "Please upload a clear selfie with exactly one face, looking straight at the camera", variant: "destructive" });
         return;
       }
 
-      const selfieDescriptor = selfieResult.descriptor;
-      console.log(`Selfie confidence: ${selfieResult.confidence.toFixed(3)}`);
-      setLastDescriptor(selfieDescriptor);
-      setSearchStatus("Scanning photos with AI...");
-      const photoIds = allPhotos.map((p) => p.id);
-      if (photoIds.length === 0) {
-        setMatchedPhotos([]);
-        setIsSearching(false);
-        setViewMode("results");
-        return;
-      }
-
-      // Fetch all face descriptors in batches
-      let allFaces: { photo_id: string; descriptor: number[] }[] = [];
-      for (let i = 0; i < photoIds.length; i += 500) {
-        const batch = photoIds.slice(i, i + 500);
-        const { data: facesData } = await supabase
-          .from("faces")
-          .select("photo_id, descriptor")
-          .in("photo_id", batch);
-        if (facesData) {
-          allFaces.push(...facesData.map((f: any) => ({
-            photo_id: f.photo_id as string,
-            descriptor: f.descriptor as number[],
-          })));
-        }
-      }
-
-      console.log(`Faces stored: ${allFaces.length}`);
-      setSearchStatus("AI is finding your photos...");
+      console.log(`Matches found: ${result.matched.length}`);
       
-      // Strict threshold: 0.5, max 50 results, sorted by accuracy
-      const matchedIds = matchFaces(selfieDescriptor, allFaces, 0.5, 50);
-      console.log(`Matches found: ${matchedIds.length}`);
-      
-      // Preserve sort order from matchFaces (best matches first)
+      // Map matched photo_ids to actual photo objects, preserving distance sort order
       const matchedMap = new Map(allPhotos.map((p) => [p.id, p]));
-      const matched = matchedIds.map((id) => matchedMap.get(id)).filter(Boolean) as PhotoRow[];
+      const matched = result.matched
+        .filter((m) => m.distance < 0.5)
+        .map((m) => matchedMap.get(m.photo_id))
+        .filter(Boolean) as PhotoRow[];
+      
       setMatchedPhotos(matched);
       setViewMode("results");
 
@@ -208,12 +181,13 @@ const EventPage = () => {
   };
 
   const handleNotifyMe = async () => {
-    if (!event || !user || !lastDescriptor) return;
+    if (!event || !user || !selfieFile) return;
 
+    // Store a placeholder descriptor — actual matching happens server-side
     const { error } = await supabase.from("photo_requests").insert({
       user_id: user.id,
       event_id: event.id,
-      face_descriptor: Array.from(lastDescriptor),
+      face_descriptor: [0], // placeholder, Python API handles matching
     });
 
     if (error) {
@@ -443,7 +417,7 @@ const EventPage = () => {
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {viewMode !== "admin-gallery" && (
-                    <Button variant="glass" size="sm" onClick={() => { setViewMode("prompt"); setSelfiePreview(null); setSelfieFile(null); setMatchedPhotos([]); setLastDescriptor(null); }}>
+                    <Button variant="glass" size="sm" onClick={() => { setViewMode("prompt"); setSelfiePreview(null); setSelfieFile(null); setMatchedPhotos([]); }}>
                       New Search
                     </Button>
                   )}
@@ -457,7 +431,7 @@ const EventPage = () => {
               </div>
 
               {/* Notify Me button when no matches (non-admin) */}
-              {viewMode === "results" && matchedPhotos.length === 0 && user && lastDescriptor && !hasNotifyRequest && (
+              {viewMode === "results" && matchedPhotos.length === 0 && user && selfieFile && !hasNotifyRequest && (
                 <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="bg-gradient-card border border-border rounded-xl p-6 text-center mb-6">
                   <Bell className="w-8 h-8 text-primary mx-auto mb-3" />
                   <h3 className="font-display font-semibold text-foreground mb-2">Notify me when photos are available</h3>
