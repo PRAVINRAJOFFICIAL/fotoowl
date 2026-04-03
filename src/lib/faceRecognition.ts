@@ -6,9 +6,6 @@ let modelsLoaded = false;
 let modelsLoading = false;
 let loadPromise: Promise<void> | null = null;
 
-/**
- * Load SsdMobilenetv1 + landmarks + recognition for maximum accuracy.
- */
 export async function loadFaceModels(): Promise<void> {
   if (modelsLoaded) return;
   if (modelsLoading && loadPromise) return loadPromise;
@@ -42,7 +39,7 @@ function resizeImage(img: HTMLImageElement, maxSize: number = 640): HTMLCanvasEl
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d")!;
-  ctx.filter = "contrast(1.12) brightness(1.06)";
+  ctx.filter = "contrast(1.15) brightness(1.08)";
   ctx.drawImage(img, 0, 0, width, height);
   return canvas;
 }
@@ -82,7 +79,6 @@ export function euclideanDistance(a: Float32Array | number[], b: Float32Array | 
   return Math.sqrt(sum);
 }
 
-/** Average multiple descriptors for more stable representation */
 export function averageDescriptors(descriptors: Float32Array[]): Float32Array {
   if (descriptors.length === 0) return new Float32Array(128);
   if (descriptors.length === 1) return descriptors[0];
@@ -94,19 +90,15 @@ export function averageDescriptors(descriptors: Float32Array[]): Float32Array {
   return normalizeDescriptor(avg);
 }
 
-/** Convert distance to confidence percentage (0.0 → 100%, 0.6 → 0%) */
+/** Convert distance to confidence percentage (0.0 → 100%, 0.55 → 0%) */
 export function distanceToConfidence(distance: number): number {
-  return Math.max(0, Math.min(100, Math.round((1 - distance / 0.6) * 100)));
+  return Math.max(0, Math.min(100, Math.round((1 - distance / 0.55) * 100)));
 }
 
 // ── Detection ──
 
-const MIN_FACE_SIZE = 50; // px — ignore tiny faces
+const MIN_FACE_SIZE = 60; // px — ignore tiny faces
 
-/**
- * Detect all faces in an image using SsdMobilenetv1 (high accuracy).
- * Filters by confidence (>0.7) and minimum face size.
- */
 export async function detectFaces(imageUrl: string): Promise<Float32Array[]> {
   await loadFaceModels();
 
@@ -126,9 +118,6 @@ export async function detectFaces(imageUrl: string): Promise<Float32Array[]> {
     .map((d) => normalizeDescriptor(d.descriptor));
 }
 
-/**
- * Process photos in batches.
- */
 export async function detectFacesBatch(
   imageUrls: string[],
   batchSize: number = 3,
@@ -162,10 +151,6 @@ export interface SelfieResult {
   confidence: number;
 }
 
-/**
- * Detect a single face from a selfie with strict quality validation.
- * Returns null if no face, multiple faces, low confidence, or too small.
- */
 export async function detectSelfie(imageDataUrl: string): Promise<SelfieResult | null> {
   await loadFaceModels();
 
@@ -177,17 +162,13 @@ export async function detectSelfie(imageDataUrl: string): Promise<SelfieResult |
     .withFaceLandmarks()
     .withFaceDescriptors();
 
-  // Must have exactly one face
   if (detections.length !== 1) return null;
 
   const det = detections[0];
-
-  // Require high confidence and minimum face size
   if (det.detection.score < 0.75) return null;
   const box = det.detection.box;
   if (box.width < 80 || box.height < 80) return null;
 
-  // Check face is reasonably centered (within middle 80% of image)
   const cx = box.x + box.width / 2;
   const cy = box.y + box.height / 2;
   if (cx < canvas.width * 0.1 || cx > canvas.width * 0.9 ||
@@ -201,10 +182,6 @@ export async function detectSelfie(imageDataUrl: string): Promise<SelfieResult |
   };
 }
 
-/**
- * Detect selfie from multiple captures, average descriptors for stability.
- * Returns null if any capture fails validation.
- */
 export async function detectMultiSelfie(imageDataUrls: string[]): Promise<{
   averaged: Float32Array;
   individual: SelfieResult[];
@@ -213,7 +190,7 @@ export async function detectMultiSelfie(imageDataUrls: string[]): Promise<{
 
   for (const url of imageDataUrls) {
     const result = await detectSelfie(url);
-    if (!result) return null; // all must succeed
+    if (!result) return null;
     results.push(result);
   }
 
@@ -231,24 +208,27 @@ export interface MatchCandidate {
   confidence: number;
 }
 
+const PRIMARY_THRESHOLD = 0.45;
+const FALLBACK_THRESHOLD = 0.50;
+
 /**
  * Strict face matching with:
- * - Normalized descriptors
- * - Best-match-per-photo
- * - Hard negative filter (reject ambiguous top matches)
- * - Confidence threshold (>75%)
- * - Double validation with multiple selfie descriptors
+ * - Primary threshold 0.45, fallback 0.50
+ * - Double validation (all selfies must match)
+ * - Hard negative filter
+ * - Min confidence 80%
+ * - Top 10 initial results
  */
 export function matchFaces(
-  selfieDescriptors: Float32Array[], // multiple selfie descriptors for double validation
+  selfieDescriptors: Float32Array[],
   storedFaces: { photo_id: string; descriptor: number[] }[],
-  threshold: number = 0.48,
-  maxResults: number = 50
+  threshold: number = PRIMARY_THRESHOLD,
+  maxResults: number = 10
 ): MatchCandidate[] {
   if (selfieDescriptors.length === 0 || storedFaces.length === 0) return [];
 
   // For each selfie descriptor, compute best distance per photo
-  const allPhotoScores: Map<string, number[]>[] = [];
+  const allPhotoScores: Map<string, number>[] = [];
 
   for (const selfieDesc of selfieDescriptors) {
     const normalized = normalizeDescriptor(selfieDesc);
@@ -264,59 +244,51 @@ export function matchFaces(
       }
     }
 
-    // Collect scores per photo across all selfie descriptors
-    const scoresMap = new Map<string, number[]>();
-    for (const [photoId, dist] of bestPerPhoto) {
-      scoresMap.set(photoId, [dist]);
-    }
-    allPhotoScores.push(scoresMap);
+    allPhotoScores.push(bestPerPhoto);
   }
 
-  // Merge: for each photo, require ALL selfie descriptors to match (double validation)
-  const mergedScores = new Map<string, number[]>();
+  // Double validation: ALL selfie descriptors must match within fallback threshold
   const allPhotoIds = new Set<string>();
   for (const scores of allPhotoScores) {
     for (const id of scores.keys()) allPhotoIds.add(id);
   }
 
+  const candidates: MatchCandidate[] = [];
+
   for (const photoId of allPhotoIds) {
     const distances: number[] = [];
     let allMatch = true;
+
     for (const scores of allPhotoScores) {
-      const dists = scores.get(photoId);
-      if (!dists || dists[0] === undefined) {
+      const dist = scores.get(photoId);
+      if (dist === undefined || dist > FALLBACK_THRESHOLD) {
         allMatch = false;
         break;
       }
-      distances.push(dists[0]);
+      distances.push(dist);
     }
-    // Double validation: ALL selfie descriptors must match this photo
-    if (allMatch && distances.every(d => d < threshold + 0.04)) {
-      mergedScores.set(photoId, distances);
-    }
-  }
 
-  // Build candidates using average distance across selfie descriptors
-  const candidates: MatchCandidate[] = [];
-  for (const [photoId, distances] of mergedScores) {
+    if (!allMatch) continue;
+
     const avgDist = distances.reduce((a, b) => a + b, 0) / distances.length;
-    if (avgDist < threshold) {
-      const confidence = distanceToConfidence(avgDist);
-      if (confidence >= 75) { // Only show high confidence matches
-        candidates.push({ photoId, distance: avgDist, confidence });
-      }
-    }
+
+    // Primary threshold check on average
+    if (avgDist > threshold) continue;
+
+    const confidence = distanceToConfidence(avgDist);
+    if (confidence < 80) continue; // strict confidence filter
+
+    candidates.push({ photoId, distance: avgDist, confidence });
   }
 
   // Sort by distance (best first)
   candidates.sort((a, b) => a.distance - b.distance);
 
-  // Hard negative filter: if top 2 are from different people and very close, reject both
+  // Hard negative filter: if top 2 are very close in distance, reject the weaker
   if (candidates.length >= 2) {
     const diff = Math.abs(candidates[0].distance - candidates[1].distance);
-    if (diff < 0.02 && candidates[0].distance > 0.35) {
-      // Ambiguous — both are weak matches close together, remove the worse one
-      console.warn(`Hard negative filter: top 2 matches too close (diff=${diff.toFixed(4)}), removing weaker match`);
+    if (diff < 0.015 && candidates[0].distance > 0.3) {
+      console.warn(`Hard negative filter: top 2 too close (diff=${diff.toFixed(4)}), removing weaker`);
       candidates.splice(1, 1);
     }
   }
