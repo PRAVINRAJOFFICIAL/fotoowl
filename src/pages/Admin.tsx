@@ -1,20 +1,22 @@
 import { useState, useEffect, useRef } from "react";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import {
-  Plus, Upload, Image, Calendar, Trash2, Brain, CheckCircle, XCircle, Clock, CreditCard
+  Plus, Upload, Image, Calendar, Trash2, Brain, CheckCircle, XCircle, Clock, CreditCard,
+  Users, BarChart3, AlertTriangle, Eye
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import Navbar from "@/components/Navbar";
 import EventCard from "@/components/EventCard";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
 import { useNavigate } from "react-router-dom";
-import { detectFacesBatch, matchFaces } from "@/lib/faceRecognition";
+import { detectFacesBatch } from "@/lib/faceRecognition";
 import { useAuth } from "@/contexts/AuthContext";
 import { QRCodeSVG } from "qrcode.react";
 
-type AdminTab = "events" | "approvals";
+type AdminTab = "events" | "approvals" | "users" | "stats";
 
 interface EventRow {
   id: string;
@@ -33,6 +35,14 @@ interface PendingEvent extends EventRow {
   user_email?: string;
 }
 
+interface ProfileRow {
+  id: string;
+  display_name: string | null;
+  role: string;
+  phone: string | null;
+  created_at: string;
+}
+
 const PLANS = [
   { id: "basic", name: "Basic", photos: 100, price: "₹499" },
   { id: "standard", name: "Standard", photos: 10000, price: "₹1,999" },
@@ -49,20 +59,30 @@ const Admin = () => {
   const [showPayment, setShowPayment] = useState(false);
   const [creatingEventData, setCreatingEventData] = useState<{ name: string; date: string; plan: string } | null>(null);
   const [events, setEvents] = useState<EventRow[]>([]);
+  const [allEvents, setAllEvents] = useState<EventRow[]>([]);
   const [pendingEvents, setPendingEvents] = useState<PendingEvent[]>([]);
+  const [users, setUsers] = useState<ProfileRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [photoCountMap, setPhotoCountMap] = useState<Record<string, number>>({});
   const [uploadingEventId, setUploadingEventId] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [totalPhotos, setTotalPhotos] = useState(0);
+  const [totalFacesCount, setTotalFacesCount] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
   const { user, isAdmin } = useAuth();
 
   useEffect(() => {
     if (user) {
-      if (isAdmin) fetchAllPendingEvents();
       fetchEvents(user.id);
+      if (isAdmin) {
+        fetchAllPendingEvents();
+        fetchAllEvents();
+        fetchUsers();
+        fetchGlobalStats();
+      }
     } else {
       setLoading(false);
     }
@@ -91,13 +111,26 @@ const Admin = () => {
     setLoading(false);
   };
 
+  const fetchAllEvents = async () => {
+    const { data } = await supabase.from("events").select("*").order("created_at", { ascending: false });
+    setAllEvents((data as EventRow[]) || []);
+  };
+
   const fetchAllPendingEvents = async () => {
-    const { data } = await supabase
-      .from("events")
-      .select("*")
-      .in("status", ["pending"])
-      .order("created_at", { ascending: false });
+    const { data } = await supabase.from("events").select("*").in("status", ["pending"]).order("created_at", { ascending: false });
     setPendingEvents((data as PendingEvent[]) || []);
+  };
+
+  const fetchUsers = async () => {
+    const { data } = await supabase.from("profiles").select("*").order("created_at", { ascending: false });
+    setUsers((data as ProfileRow[]) || []);
+  };
+
+  const fetchGlobalStats = async () => {
+    const { count: photosCount } = await supabase.from("photos").select("*", { count: "exact", head: true });
+    const { count: facesCount } = await supabase.from("faces").select("*", { count: "exact", head: true });
+    setTotalPhotos(photosCount || 0);
+    setTotalFacesCount(facesCount || 0);
   };
 
   const generateEventCode = () => {
@@ -133,7 +166,7 @@ const Admin = () => {
     if (error) {
       toast({ title: "Error", description: error.message, variant: "destructive" });
     } else {
-      toast({ title: "Event Created!", description: "Waiting for admin approval. You'll get access once verified." });
+      toast({ title: "Event Created!", description: "Waiting for admin approval." });
       setNewEvent({ name: "", date: "" });
       setShowCreate(false);
       setShowPayment(false);
@@ -151,26 +184,108 @@ const Admin = () => {
     } else {
       toast({ title: "Event approved! ✅" });
       fetchAllPendingEvents();
+      fetchAllEvents();
     }
   };
 
   const handleReject = async (eventId: string) => {
-    const { error } = await supabase.from("events").update({ status: "rejected", payment_status: "failed" }).eq("id", eventId);
-    if (error) {
-      toast({ title: "Error", description: error.message, variant: "destructive" });
-    } else {
-      toast({ title: "Event rejected ❌" });
+    setConfirmDeleteId(eventId);
+  };
+
+  const confirmRejectAndDelete = async () => {
+    if (!confirmDeleteId) return;
+    const eventId = confirmDeleteId;
+    setConfirmDeleteId(null);
+
+    try {
+      // 1. Get all photos for this event
+      const { data: photos } = await supabase.from("photos").select("id, image_url").eq("event_id", eventId);
+      
+      if (photos && photos.length > 0) {
+        const photoIds = photos.map(p => p.id);
+        
+        // 2. Delete face descriptors
+        for (let i = 0; i < photoIds.length; i += 100) {
+          await supabase.from("faces").delete().in("photo_id", photoIds.slice(i, i + 100));
+        }
+        
+        // 3. Delete photos from storage
+        const storagePaths = photos
+          .map(p => {
+            const url = p.image_url;
+            const match = url.match(/event-photos\/(.+?)(\?|$)/);
+            return match ? match[1] : null;
+          })
+          .filter(Boolean) as string[];
+
+        if (storagePaths.length > 0) {
+          await supabase.storage.from("event-photos").remove(storagePaths);
+        }
+        
+        // 4. Delete photo rows
+        await supabase.from("photos").delete().eq("event_id", eventId);
+      }
+      
+      // 5. Delete photo requests
+      await supabase.from("photo_requests").delete().eq("event_id", eventId);
+      
+      // 6. Delete notifications
+      await supabase.from("notifications").delete().eq("event_id", eventId);
+      
+      // 7. Delete event
+      await supabase.from("events").delete().eq("id", eventId);
+      
+      toast({ title: "Event rejected & deleted ❌", description: "All associated data has been removed" });
       fetchAllPendingEvents();
+      fetchAllEvents();
+      fetchGlobalStats();
+    } catch (err) {
+      console.error("Reject error:", err);
+      toast({ title: "Error", description: "Failed to fully delete event", variant: "destructive" });
     }
   };
 
   const handleDeleteEvent = async (eventId: string) => {
-    const { error } = await supabase.from("events").delete().eq("id", eventId);
-    if (error) {
-      toast({ title: "Error", description: error.message, variant: "destructive" });
-    } else {
+    setConfirmDeleteId(eventId);
+  };
+
+  const confirmDelete = async () => {
+    if (!confirmDeleteId) return;
+    const eventId = confirmDeleteId;
+    setConfirmDeleteId(null);
+
+    try {
+      const { data: photos } = await supabase.from("photos").select("id, image_url").eq("event_id", eventId);
+      
+      if (photos && photos.length > 0) {
+        const photoIds = photos.map(p => p.id);
+        for (let i = 0; i < photoIds.length; i += 100) {
+          await supabase.from("faces").delete().in("photo_id", photoIds.slice(i, i + 100));
+        }
+        const storagePaths = photos
+          .map(p => {
+            const match = p.image_url.match(/event-photos\/(.+?)(\?|$)/);
+            return match ? match[1] : null;
+          })
+          .filter(Boolean) as string[];
+        if (storagePaths.length > 0) {
+          await supabase.storage.from("event-photos").remove(storagePaths);
+        }
+        await supabase.from("photos").delete().eq("event_id", eventId);
+      }
+      
+      await supabase.from("photo_requests").delete().eq("event_id", eventId);
+      await supabase.from("notifications").delete().eq("event_id", eventId);
+      await supabase.from("events").delete().eq("id", eventId);
+      
       toast({ title: "Event deleted" });
       fetchEvents(user!.id);
+      if (isAdmin) {
+        fetchAllEvents();
+        fetchGlobalStats();
+      }
+    } catch {
+      toast({ title: "Error deleting event", variant: "destructive" });
     }
   };
 
@@ -183,7 +298,7 @@ const Admin = () => {
     const currentCount = photoCountMap[uploadingEventId] || 0;
 
     if (plan && plan.photos !== Infinity && currentCount + files.length > plan.photos) {
-      toast({ title: "Plan limit reached", description: `Your ${plan.name} plan allows max ${plan.photos} photos. You have ${currentCount} uploaded.`, variant: "destructive" });
+      toast({ title: "Plan limit reached", description: `Your ${plan.name} plan allows max ${plan.photos} photos.`, variant: "destructive" });
       return;
     }
 
@@ -192,7 +307,6 @@ const Admin = () => {
 
     setUploadProgress(`Uploading 0/${totalFiles}...`);
 
-    // Upload files to Supabase storage first
     const uploadedPhotos: { id: string; url: string }[] = [];
     for (const file of Array.from(files)) {
       const ext = file.name.split(".").pop();
@@ -210,42 +324,52 @@ const Admin = () => {
       if (insertErr || !photoRow) continue;
       uploadedPhotos.push({ id: photoRow.id, url: urlData.publicUrl });
       uploaded++;
-      setUploadProgress(`Uploaded ${uploaded}/${totalFiles} — Detecting faces...`);
+      setUploadProgress(`Uploaded ${uploaded}/${totalFiles}`);
     }
 
-    // Batch face detection using face-api.js (SsdMobilenetv1)
+    // Face detection
     let totalFaces = 0;
+    setUploadProgress(`Detecting faces...`);
     const urls = uploadedPhotos.map(p => p.url);
     const batchResults = await detectFacesBatch(urls, 3, (done, total) => {
-      setUploadProgress(`Detecting faces: ${done}/${total} photos processed`);
+      setUploadProgress(`Detecting faces: ${done}/${total}`);
     });
 
     for (const result of batchResults) {
       const photo = uploadedPhotos.find(p => p.url === result.url);
       if (!photo) continue;
       for (const desc of result.descriptors) {
-        const descArray = Array.from(desc);
-        await supabase.from("faces").insert({ photo_id: photo.id, descriptor: descArray });
+        await supabase.from("faces").insert({ photo_id: photo.id, descriptor: Array.from(desc) });
         totalFaces++;
       }
     }
 
     setUploadProgress(null);
-    toast({ title: "Upload Complete!", description: `${uploaded}/${totalFiles} photos uploaded, ${totalFaces} faces detected` });
+    toast({ title: "Upload Complete!", description: `${uploaded} photos, ${totalFaces} faces detected` });
     setUploadingEventId(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
     fetchEvents(user!.id);
+    if (isAdmin) fetchGlobalStats();
   };
 
-  const totalPhotos = Object.values(photoCountMap).reduce((a, b) => a + b, 0);
+  const myTotalPhotos = Object.values(photoCountMap).reduce((a, b) => a + b, 0);
   const approvedEvents = events.filter(e => e.status === "approved");
 
-  const stats = [
-    { label: "Total Events", value: String(events.length), icon: Calendar },
+  const myStats = [
+    { label: "My Events", value: String(events.length), icon: Calendar },
     { label: "Approved", value: String(approvedEvents.length), icon: CheckCircle },
-    { label: "Total Photos", value: String(totalPhotos), icon: Image },
+    { label: "My Photos", value: String(myTotalPhotos), icon: Image },
     { label: "Pending", value: String(events.filter(e => e.status === "pending").length), icon: Clock },
   ];
+
+  const globalStats = isAdmin ? [
+    { label: "Total Users", value: String(users.length), icon: Users },
+    { label: "Total Events", value: String(allEvents.length), icon: Calendar },
+    { label: "Total Photos", value: String(totalPhotos), icon: Image },
+    { label: "Total Faces", value: String(totalFacesCount), icon: Brain },
+    { label: "Pending Approvals", value: String(pendingEvents.length), icon: Clock },
+    { label: "Revenue Events", value: String(allEvents.filter(e => e.payment_status === "paid").length), icon: BarChart3 },
+  ] : [];
 
   const getStatusBadge = (status: string) => {
     switch (status) {
@@ -255,10 +379,35 @@ const Admin = () => {
     }
   };
 
+  const tabs: AdminTab[] = isAdmin ? ["events", "approvals", "users", "stats"] : ["events"];
+
   return (
     <div className="min-h-screen bg-gradient-dark">
       <Navbar />
       <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handlePhotoUpload} />
+
+      {/* Confirm delete dialog */}
+      <AnimatePresence>
+        {confirmDeleteId && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} exit={{ scale: 0.9 }} className="bg-card border border-border rounded-2xl p-6 max-w-sm w-full shadow-card">
+              <AlertTriangle className="w-10 h-10 text-destructive mx-auto mb-4" />
+              <h3 className="font-display font-semibold text-lg text-center mb-2">Confirm Delete</h3>
+              <p className="text-muted-foreground text-sm text-center mb-6">
+                This will permanently delete the event, all photos, face data, and notifications. This cannot be undone.
+              </p>
+              <div className="flex gap-3">
+                <Button variant="ghost" className="flex-1" onClick={() => setConfirmDeleteId(null)}>Cancel</Button>
+                <Button variant="destructive" className="flex-1" onClick={tab === "approvals" ? confirmRejectAndDelete : confirmDelete}>
+                  <Trash2 className="w-4 h-4" />
+                  Delete Everything
+                </Button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <div className="container pt-20 pb-16">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8 pt-4">
           <div>
@@ -266,7 +415,7 @@ const Admin = () => {
               {isAdmin ? "Admin Panel" : "Event Management"}
             </h1>
             <p className="text-muted-foreground text-sm mt-1">
-              {isAdmin ? "Manage events, approvals, and photos" : "Create and manage your events"}
+              {isAdmin ? "Manage events, users, approvals, and analytics" : "Create and manage your events"}
             </p>
           </div>
           <Button variant="hero" size="default" onClick={() => { setShowCreate(!showCreate); setShowPayment(false); }}>
@@ -306,14 +455,10 @@ const Admin = () => {
                     className={`relative border rounded-xl p-5 text-left transition-all ${selectedPlan === plan.id ? "border-primary bg-primary/10 shadow-gold" : "border-border bg-secondary hover:border-primary/40"}`}
                   >
                     <h5 className="font-display font-bold text-foreground text-lg">{plan.name}</h5>
-                    <p className="text-muted-foreground text-sm mt-1">
-                      Max {plan.label || plan.photos.toLocaleString()} photos
-                    </p>
+                    <p className="text-muted-foreground text-sm mt-1">Max {plan.label || plan.photos.toLocaleString()} photos</p>
                     <p className="font-display font-bold text-primary text-xl mt-3">{plan.price}</p>
                     {selectedPlan === plan.id && (
-                      <div className="absolute top-3 right-3">
-                        <CheckCircle className="w-5 h-5 text-primary" />
-                      </div>
+                      <div className="absolute top-3 right-3"><CheckCircle className="w-5 h-5 text-primary" /></div>
                     )}
                   </button>
                 ))}
@@ -321,8 +466,7 @@ const Admin = () => {
 
               <div className="flex gap-3">
                 <Button variant="hero" size="default" onClick={handleProceedToPayment}>
-                  <CreditCard className="w-4 h-4" />
-                  Proceed to Payment
+                  <CreditCard className="w-4 h-4" /> Proceed to Payment
                 </Button>
                 <Button variant="ghost" size="default" onClick={() => setShowCreate(false)}>Cancel</Button>
               </div>
@@ -338,28 +482,39 @@ const Admin = () => {
               <p className="text-muted-foreground text-sm mb-6">
                 Pay via UPI to activate your <strong className="text-primary">{PLANS.find(p => p.id === creatingEventData.plan)?.name}</strong> plan
               </p>
-
               <div className="bg-foreground p-4 rounded-xl inline-block mb-4">
                 <QRCodeSVG value={`upi://pay?pa=${UPI_NUMBER}@upi&pn=FotoOwl&am=${PLANS.find(p => p.id === creatingEventData.plan)?.price.replace(/[₹,]/g, '')}`} size={180} />
               </div>
-
               <p className="text-foreground font-display font-medium text-lg mb-1">UPI: {UPI_NUMBER}</p>
               <p className="text-muted-foreground text-sm mb-6">
                 Amount: <strong className="text-primary">{PLANS.find(p => p.id === creatingEventData.plan)?.price}</strong>
               </p>
-
               <Button variant="hero" size="lg" className="w-full" onClick={handleIPaid} disabled={creating}>
                 {creating ? "Creating Event..." : "✅ I Paid"}
               </Button>
-              <Button variant="ghost" size="sm" className="w-full mt-2" onClick={() => setShowPayment(false)}>
-                Back
-              </Button>
+              <Button variant="ghost" size="sm" className="w-full mt-2" onClick={() => setShowPayment(false)}>Back</Button>
             </div>
           </motion.div>
         )}
 
+        {/* Global admin stats */}
+        {isAdmin && globalStats.length > 0 && (
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
+            {globalStats.map((s, i) => (
+              <motion.div key={s.label} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.04 }} className="bg-gradient-card border border-border rounded-xl p-4 shadow-card">
+                <div className="flex items-center gap-2 mb-1">
+                  <s.icon className="w-4 h-4 text-primary" />
+                  <span className="text-xs text-muted-foreground font-display truncate">{s.label}</span>
+                </div>
+                <span className="font-display font-bold text-xl text-foreground">{s.value}</span>
+              </motion.div>
+            ))}
+          </div>
+        )}
+
+        {/* My stats */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-          {stats.map((s, i) => (
+          {myStats.map((s, i) => (
             <motion.div key={s.label} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }} className="bg-gradient-card border border-border rounded-xl p-5 shadow-card">
               <div className="flex items-center gap-3 mb-2">
                 <s.icon className="w-5 h-5 text-primary" />
@@ -370,11 +525,12 @@ const Admin = () => {
           ))}
         </div>
 
-        <div className="flex bg-secondary rounded-xl p-1 mb-8 max-w-xs">
-          {(isAdmin ? ["events", "approvals"] as AdminTab[] : ["events"] as AdminTab[]).map((t) => (
+        {/* Tabs */}
+        <div className="flex bg-secondary rounded-xl p-1 mb-8 max-w-md overflow-x-auto">
+          {tabs.map((t) => (
             <button
               key={t}
-              className={`flex-1 text-sm font-display font-medium py-2.5 rounded-lg transition-all capitalize ${tab === t ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
+              className={`flex-1 text-sm font-display font-medium py-2.5 rounded-lg transition-all capitalize whitespace-nowrap px-3 ${tab === t ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
               onClick={() => setTab(t)}
             >
               {t}
@@ -382,10 +538,21 @@ const Admin = () => {
           ))}
         </div>
 
+        {/* EVENTS TAB */}
         {tab === "events" && (
           <>
             {loading ? (
-              <div className="text-center py-12 text-muted-foreground">Loading events...</div>
+              <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {[1, 2, 3].map(i => (
+                  <div key={i} className="rounded-2xl overflow-hidden">
+                    <Skeleton className="h-48 w-full" />
+                    <div className="p-4 space-y-2">
+                      <Skeleton className="h-5 w-3/4" />
+                      <Skeleton className="h-4 w-1/2" />
+                    </div>
+                  </div>
+                ))}
+              </div>
             ) : events.length === 0 ? (
               <div className="text-center py-12">
                 <Calendar className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
@@ -396,19 +563,17 @@ const Admin = () => {
             ) : (
               <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
                 {events.map((event) => (
-                  <div key={event.id} className="relative group">
+                  <motion.div key={event.id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="relative group">
                     {event.status === "pending" && (
                       <div className="absolute inset-0 z-10 bg-background/70 backdrop-blur-sm rounded-2xl flex flex-col items-center justify-center">
                         <Clock className="w-8 h-8 text-yellow-400 mb-2" />
-                        <p className="font-display font-medium text-foreground">Waiting for admin approval ⏳</p>
-                        <p className="text-muted-foreground text-xs mt-1">Payment verification in progress</p>
+                        <p className="font-display font-medium text-foreground">Waiting for approval ⏳</p>
                       </div>
                     )}
                     {event.status === "rejected" && (
                       <div className="absolute inset-0 z-10 bg-background/70 backdrop-blur-sm rounded-2xl flex flex-col items-center justify-center">
                         <XCircle className="w-8 h-8 text-destructive mb-2" />
                         <p className="font-display font-medium text-foreground">Payment not verified ❌</p>
-                        <p className="text-muted-foreground text-xs mt-1">Contact support for help</p>
                       </div>
                     )}
                     <EventCard
@@ -420,9 +585,7 @@ const Admin = () => {
                       photoCount={photoCountMap[event.id] || 0}
                       eventCode={event.event_code}
                     />
-                    <div className="absolute top-3 left-3 z-20">
-                      {getStatusBadge(event.status)}
-                    </div>
+                    <div className="absolute top-3 left-3 z-20">{getStatusBadge(event.status)}</div>
                     {event.status === "approved" && (
                       <div className="absolute top-3 right-3 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity z-20">
                         <button onClick={() => { setUploadingEventId(event.id); fileInputRef.current?.click(); }} className="p-2 bg-primary rounded-lg text-primary-foreground hover:bg-primary/80 transition-colors" title="Upload photos">
@@ -433,13 +596,14 @@ const Admin = () => {
                         </button>
                       </div>
                     )}
-                  </div>
+                  </motion.div>
                 ))}
               </div>
             )}
           </>
         )}
 
+        {/* APPROVALS TAB */}
         {tab === "approvals" && isAdmin && (
           <div className="space-y-4">
             {pendingEvents.length === 0 ? (
@@ -459,24 +623,102 @@ const Admin = () => {
                         <span>Code: <strong className="text-foreground">{event.event_code}</strong></span>
                         {event.date && <span>Date: {new Date(event.date).toLocaleDateString()}</span>}
                       </div>
-                      <p className="text-xs text-muted-foreground mt-1">
-                        Created: {new Date(event.created_at).toLocaleString()}
-                      </p>
+                      <p className="text-xs text-muted-foreground mt-1">Created: {new Date(event.created_at).toLocaleString()}</p>
                     </div>
                     <div className="flex gap-3">
                       <Button variant="hero" size="sm" onClick={() => handleApprove(event.id)}>
-                        <CheckCircle className="w-4 h-4" />
-                        Approve
+                        <CheckCircle className="w-4 h-4" /> Approve
                       </Button>
                       <Button variant="glass" size="sm" onClick={() => handleReject(event.id)} className="border-destructive/50 text-destructive hover:bg-destructive/10">
-                        <XCircle className="w-4 h-4" />
-                        Reject
+                        <XCircle className="w-4 h-4" /> Reject & Delete
                       </Button>
                     </div>
                   </div>
                 </motion.div>
               ))
             )}
+          </div>
+        )}
+
+        {/* USERS TAB */}
+        {tab === "users" && isAdmin && (
+          <div className="space-y-3">
+            {users.length === 0 ? (
+              <div className="text-center py-12">
+                <Users className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
+                <h3 className="font-display font-semibold text-lg">No users yet</h3>
+              </div>
+            ) : (
+              <>
+                <div className="text-sm text-muted-foreground mb-4">{users.length} registered users</div>
+                {users.map((u) => (
+                  <motion.div key={u.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="bg-gradient-card border border-border rounded-xl p-4 shadow-card flex items-center justify-between">
+                    <div>
+                      <p className="font-display font-medium text-foreground">{u.display_name || "Unnamed"}</p>
+                      <p className="text-xs text-muted-foreground">{u.phone || "No phone"} · Joined {new Date(u.created_at).toLocaleDateString()}</p>
+                    </div>
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-display ${u.role === "admin" ? "bg-primary/20 text-primary" : "bg-secondary text-muted-foreground"}`}>
+                      {u.role}
+                    </span>
+                  </motion.div>
+                ))}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* STATS TAB */}
+        {tab === "stats" && isAdmin && (
+          <div className="space-y-6">
+            <div className="bg-gradient-card border border-border rounded-2xl p-6 shadow-card">
+              <h3 className="font-display font-semibold text-lg text-foreground mb-4">Platform Overview</h3>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
+                <div>
+                  <p className="text-muted-foreground text-sm">Total Users</p>
+                  <p className="font-display font-bold text-3xl text-foreground">{users.length}</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground text-sm">Total Events</p>
+                  <p className="font-display font-bold text-3xl text-foreground">{allEvents.length}</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground text-sm">Total Photos</p>
+                  <p className="font-display font-bold text-3xl text-foreground">{totalPhotos}</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground text-sm">Faces Detected</p>
+                  <p className="font-display font-bold text-3xl text-primary">{totalFacesCount}</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground text-sm">Approved Events</p>
+                  <p className="font-display font-bold text-3xl text-green-400">{allEvents.filter(e => e.status === "approved").length}</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground text-sm">Pending Events</p>
+                  <p className="font-display font-bold text-3xl text-yellow-400">{pendingEvents.length}</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-gradient-card border border-border rounded-2xl p-6 shadow-card">
+              <h3 className="font-display font-semibold text-lg text-foreground mb-4">Recent Events</h3>
+              <div className="space-y-3">
+                {allEvents.slice(0, 10).map(ev => (
+                  <div key={ev.id} className="flex items-center justify-between py-2 border-b border-border last:border-0">
+                    <div>
+                      <p className="font-display font-medium text-foreground text-sm">{ev.name}</p>
+                      <p className="text-xs text-muted-foreground">{new Date(ev.created_at).toLocaleDateString()} · {ev.selected_plan}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {getStatusBadge(ev.status)}
+                      <Button variant="ghost" size="sm" onClick={() => navigate(`/event/${ev.event_code}`)}>
+                        <Eye className="w-3 h-3" />
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         )}
       </div>

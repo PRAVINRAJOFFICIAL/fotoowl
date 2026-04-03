@@ -1,7 +1,8 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useParams } from "react-router-dom";
-import { Upload, Camera, Search, Download, Heart, Share2, Image as ImageIcon, ArrowLeft, Loader2, Brain, AlertCircle, Bell, Plus, CheckCircle2 } from "lucide-react";
+import { Upload, Camera, Search, Download, Heart, Share2, Image as ImageIcon, ArrowLeft, Loader2, Brain, AlertCircle, Bell, Plus, CheckCircle2, RotateCcw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Link } from "react-router-dom";
 import Navbar from "@/components/Navbar";
 import { motion, AnimatePresence } from "framer-motion";
@@ -15,11 +16,11 @@ import {
   detectSelfie,
   detectMultiSelfie,
   matchFaces,
-  distanceToConfidence,
   type SelfieResult,
   type MatchCandidate,
 } from "@/lib/faceRecognition";
 import { useAuth } from "@/contexts/AuthContext";
+import PhotoLightbox from "@/components/PhotoLightbox";
 
 type ViewMode = "prompt" | "selfie" | "results" | "admin-gallery";
 
@@ -40,6 +41,7 @@ interface EventRow {
 
 const MAX_SELFIES = 3;
 const MIN_SELFIES = 2;
+const PHOTOS_PER_CHUNK = 12;
 
 const EventPage = () => {
   const { eventId } = useParams();
@@ -57,6 +59,9 @@ const EventPage = () => {
   const [selfieError, setSelfieError] = useState<string | null>(null);
   const [hasNotifyRequest, setHasNotifyRequest] = useState(false);
   const [lastDescriptors, setLastDescriptors] = useState<Float32Array[] | null>(null);
+  const [favorites, setFavorites] = useState<Set<string>>(new Set());
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const [visibleCount, setVisibleCount] = useState(PHOTOS_PER_CHUNK);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -68,6 +73,24 @@ const EventPage = () => {
   useEffect(() => {
     if (eventId) fetchEvent();
   }, [eventId]);
+
+  // Load favorites from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem(`favorites_${eventId}`);
+    if (saved) setFavorites(new Set(JSON.parse(saved)));
+  }, [eventId]);
+
+  const saveFavorites = (newFavs: Set<string>) => {
+    setFavorites(newFavs);
+    localStorage.setItem(`favorites_${eventId}`, JSON.stringify([...newFavs]));
+  };
+
+  const toggleFavorite = (photoId: string) => {
+    const newFavs = new Set(favorites);
+    if (newFavs.has(photoId)) newFavs.delete(photoId);
+    else newFavs.add(photoId);
+    saveFavorites(newFavs);
+  };
 
   const fetchEvent = async () => {
     setLoading(true);
@@ -139,12 +162,11 @@ const EventPage = () => {
     reader.onload = async (ev) => {
       const dataUrl = ev.target?.result as string;
 
-      // Validate face immediately
       setSearchStatus("Checking face quality...");
       const result = await detectSelfie(dataUrl);
 
       if (!result) {
-        setSelfieError("No clear face detected. Please use a well-lit, frontal selfie with one face visible.");
+        setSelfieError("No clear face detected. Use a well-lit, frontal photo with one face visible.");
         setSearchStatus("");
         if (fileInputRef.current) fileInputRef.current.value = "";
         return;
@@ -184,7 +206,7 @@ const EventPage = () => {
       const selfieDescriptors = [multiResult.averaged, ...multiResult.individual.map(r => r.descriptor)];
       setLastDescriptors(selfieDescriptors);
 
-      setSearchStatus("Loading event face data...");
+      setSearchStatus("Loading face data...");
       const photoIds = allPhotos.map((p) => p.id);
       if (photoIds.length === 0) {
         setMatchedPhotos([]);
@@ -193,7 +215,6 @@ const EventPage = () => {
         return;
       }
 
-      // Fetch all face descriptors
       let allFaces: { photo_id: string; descriptor: number[] }[] = [];
       for (let i = 0; i < photoIds.length; i += 500) {
         const batch = photoIds.slice(i, i + 500);
@@ -209,12 +230,9 @@ const EventPage = () => {
         }
       }
 
-      console.log(`Faces stored: ${allFaces.length}`);
       setSearchStatus("AI is finding your photos...");
 
-      // Use all selfie descriptors for double validation matching
-      const matches = matchFaces(selfieDescriptors, allFaces, 0.48, 50);
-      console.log(`Matches found: ${matches.length}`);
+      const matches = matchFaces(selfieDescriptors, allFaces, 0.45, 10);
 
       const matchedMap = new Map(allPhotos.map((p) => [p.id, p]));
       const matched = matches
@@ -226,9 +244,10 @@ const EventPage = () => {
 
       setMatchedPhotos(matched);
       setViewMode("results");
+      setVisibleCount(PHOTOS_PER_CHUNK);
 
       if (matched.length > 0) {
-        toast({ title: `We found ${matched.length} photos of you 🎉` });
+        toast({ title: `Found ${matched.length} photos of you! 🎉` });
       } else {
         toast({ title: "No photos found 😢", description: "Try different selfies or check back later" });
       }
@@ -254,7 +273,7 @@ const EventPage = () => {
       toast({ title: "Error", description: error.message, variant: "destructive" });
     } else {
       setHasNotifyRequest(true);
-      toast({ title: "You'll be notified! 🔔", description: "We'll let you know when new photos of you are available" });
+      toast({ title: "You'll be notified! 🔔", description: "We'll alert you when new photos match" });
     }
   };
 
@@ -301,18 +320,29 @@ const EventPage = () => {
     setMatchedPhotos([]);
     setLastDescriptors(null);
     setSelfieError(null);
+    setVisibleCount(PHOTOS_PER_CHUNK);
+  };
+
+  const loadMore = () => {
+    setVisibleCount(prev => prev + PHOTOS_PER_CHUNK);
   };
 
   const eventUrl = event ? `${window.location.origin}/event/${event.event_code}` : "";
   const displayPhotos = viewMode === "admin-gallery" ? allPhotos.map(p => ({ photo: p, confidence: 100 })) : matchedPhotos;
+  const visiblePhotos = displayPhotos.slice(0, visibleCount);
 
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-dark">
         <Navbar />
-        <div className="container pt-32 flex flex-col items-center">
-          <Loader2 className="w-8 h-8 animate-spin text-primary mb-4" />
-          <p className="text-muted-foreground">Loading event...</p>
+        <div className="container pt-24 pb-16">
+          <Skeleton className="h-8 w-64 mb-4" />
+          <Skeleton className="h-4 w-48 mb-8" />
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+            {[1, 2, 3, 4, 5, 6, 7, 8].map(i => (
+              <Skeleton key={i} className="aspect-[4/3] rounded-xl" />
+            ))}
+          </div>
         </div>
       </div>
     );
@@ -335,6 +365,21 @@ const EventPage = () => {
   return (
     <div className="min-h-screen bg-gradient-dark">
       <Navbar />
+
+      {/* Photo Lightbox */}
+      {lightboxIndex !== null && (
+        <PhotoLightbox
+          photos={displayPhotos.map(d => d.photo)}
+          initialIndex={lightboxIndex}
+          onClose={() => setLightboxIndex(null)}
+          onDownload={handleDownloadSingle}
+          onShare={handleShareWhatsApp}
+          onFavorite={toggleFavorite}
+          favorites={favorites}
+          eventName={event.name}
+        />
+      )}
+
       <div className="container pt-20 pb-16">
         <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-8 pt-4">
           <div>
@@ -351,8 +396,7 @@ const EventPage = () => {
           </div>
           <div className="flex gap-3">
             <Button variant="glass" size="sm" onClick={() => setShowQR(!showQR)}>
-              <Share2 className="w-4 h-4" />
-              Share
+              <Share2 className="w-4 h-4" /> Share
             </Button>
           </div>
         </div>
@@ -366,7 +410,7 @@ const EventPage = () => {
                 </div>
                 <div>
                   <h3 className="font-display font-semibold text-lg text-foreground mb-2">Share this Event</h3>
-                  <p className="text-muted-foreground text-sm mb-3">Guests can scan this QR code or use the event code to join</p>
+                  <p className="text-muted-foreground text-sm mb-3">Guests can scan this QR code or use the event code</p>
                   <div className="bg-secondary text-foreground font-display font-bold tracking-widest text-xl px-6 py-3 rounded-xl inline-block">
                     {event.event_code}
                   </div>
@@ -380,16 +424,18 @@ const EventPage = () => {
         {viewMode === "prompt" && (
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="max-w-lg mx-auto py-12">
             <div className="bg-gradient-card border border-border rounded-2xl p-8 shadow-card text-center">
-              <Camera className="w-14 h-14 text-primary mx-auto mb-4" />
-              <h2 className="font-display font-semibold text-xl text-foreground mb-2">Upload {MIN_SELFIES}–{MAX_SELFIES} selfies to find your photos</h2>
-              <p className="text-muted-foreground text-sm mb-2">Multiple selfies improve accuracy through AI double-validation</p>
-              <p className="text-muted-foreground text-xs mb-6">📸 Use clear, well-lit, frontal photos — look straight at the camera</p>
+              <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto mb-4">
+                <Camera className="w-8 h-8 text-primary" />
+              </div>
+              <h2 className="font-display font-semibold text-xl text-foreground mb-2">Find Your Photos</h2>
+              <p className="text-muted-foreground text-sm mb-1">Upload {MIN_SELFIES}–{MAX_SELFIES} selfies for AI double-validation</p>
+              <p className="text-muted-foreground text-xs mb-6">📸 Well-lit, frontal — look straight at camera</p>
 
               {selfieError && (
-                <div className="flex items-center gap-2 text-destructive text-sm mb-4 justify-center">
-                  <AlertCircle className="w-4 h-4" />
+                <motion.div initial={{ opacity: 0, y: -5 }} animate={{ opacity: 1, y: 0 }} className="flex items-center gap-2 text-destructive text-sm mb-4 justify-center bg-destructive/10 p-3 rounded-lg">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0" />
                   {selfieError}
-                </div>
+                </motion.div>
               )}
 
               {searchStatus && (
@@ -399,11 +445,10 @@ const EventPage = () => {
                 </div>
               )}
 
-              {/* Selfie thumbnails */}
               {selfiePreviews.length > 0 && (
                 <div className="flex gap-3 justify-center mb-6">
                   {selfiePreviews.map((preview, i) => (
-                    <div key={i} className="relative">
+                    <motion.div key={i} initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="relative">
                       <img src={preview} alt={`Selfie ${i + 1}`} className="w-20 h-20 rounded-xl object-cover border-2 border-primary/30" />
                       <button
                         onClick={() => removeSelfie(i)}
@@ -412,7 +457,7 @@ const EventPage = () => {
                         ×
                       </button>
                       <CheckCircle2 className="absolute -bottom-1 -right-1 w-4 h-4 text-primary" />
-                    </div>
+                    </motion.div>
                   ))}
                 </div>
               )}
@@ -440,10 +485,11 @@ const EventPage = () => {
               </label>
 
               {selfiePreviews.length >= MIN_SELFIES && (
-                <Button variant="hero" size="lg" className="w-full mt-3" onClick={() => setViewMode("selfie")}>
-                  <Search className="w-5 h-5" />
-                  Continue to Find Photos
-                </Button>
+                <motion.div initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }}>
+                  <Button variant="hero" size="lg" className="w-full mt-3" onClick={() => setViewMode("selfie")}>
+                    <Search className="w-5 h-5" /> Continue to Find Photos
+                  </Button>
+                </motion.div>
               )}
             </div>
           </motion.div>
@@ -453,10 +499,10 @@ const EventPage = () => {
         {viewMode === "selfie" && (
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="max-w-lg mx-auto mb-12">
             <div className="bg-gradient-card border border-border rounded-2xl p-8 shadow-card text-center">
+              <Sparkles className="w-8 h-8 text-primary mx-auto mb-3" />
               <h2 className="font-display font-semibold text-xl text-foreground mb-2">Your Selfies ({selfiePreviews.length})</h2>
               <p className="text-muted-foreground text-sm mb-6">AI will cross-validate all selfies for maximum accuracy</p>
 
-              {/* Face guide overlay info */}
               <div className="flex gap-3 justify-center mb-6">
                 {selfiePreviews.map((preview, i) => (
                   <div key={i} className="relative">
@@ -469,30 +515,34 @@ const EventPage = () => {
               </div>
 
               {selfieError && (
-                <div className="flex items-center gap-2 text-destructive text-sm mb-4 justify-center">
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex items-center gap-2 text-destructive text-sm mb-4 justify-center bg-destructive/10 p-3 rounded-lg">
                   <AlertCircle className="w-4 h-4" />
                   {selfieError}
-                </div>
+                </motion.div>
               )}
 
               {isSearching && searchStatus && (
-                <div className="flex items-center gap-2 text-primary text-sm mb-4 justify-center">
-                  <Brain className="w-4 h-4 animate-pulse" />
-                  {searchStatus}
-                </div>
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mb-4">
+                  <div className="flex items-center gap-2 text-primary text-sm justify-center mb-2">
+                    <Brain className="w-4 h-4 animate-pulse" />
+                    {searchStatus}
+                  </div>
+                  <div className="w-full bg-secondary rounded-full h-1.5 overflow-hidden">
+                    <motion.div
+                      className="h-full bg-primary rounded-full"
+                      initial={{ width: "0%" }}
+                      animate={{ width: "80%" }}
+                      transition={{ duration: 3, ease: "easeInOut" }}
+                    />
+                  </div>
+                </motion.div>
               )}
 
               <Button variant="hero" size="lg" className="w-full" disabled={isSearching} onClick={handleFindPhotos}>
                 {isSearching ? (
-                  <>
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                    Scanning with AI...
-                  </>
+                  <><Loader2 className="w-5 h-5 animate-spin" /> Scanning with AI...</>
                 ) : (
-                  <>
-                    <Search className="w-5 h-5" />
-                    Find My Photos
-                  </>
+                  <><Search className="w-5 h-5" /> Find My Photos</>
                 )}
               </Button>
 
@@ -524,7 +574,7 @@ const EventPage = () => {
                       </div>
                       <span className="text-sm text-foreground font-display">
                         {matchedPhotos.length > 0 ? (
-                          <>We found <strong className="text-primary">{matchedPhotos.length} photos</strong> of you 🎉</>
+                          <>Found <strong className="text-primary">{matchedPhotos.length} photos</strong> of you 🎉</>
                         ) : (
                           <>No photos found 😢</>
                         )}
@@ -535,7 +585,7 @@ const EventPage = () => {
                 <div className="flex flex-wrap gap-2">
                   {viewMode !== "admin-gallery" && (
                     <Button variant="glass" size="sm" onClick={resetSearch}>
-                      New Search
+                      <RotateCcw className="w-4 h-4" /> Try Again
                     </Button>
                   )}
                   {displayPhotos.length > 0 && (
@@ -551,60 +601,83 @@ const EventPage = () => {
               {viewMode === "results" && matchedPhotos.length === 0 && user && lastDescriptors && !hasNotifyRequest && (
                 <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="bg-gradient-card border border-border rounded-xl p-6 text-center mb-6">
                   <Bell className="w-8 h-8 text-primary mx-auto mb-3" />
-                  <h3 className="font-display font-semibold text-foreground mb-2">Notify me when photos are available</h3>
-                  <p className="text-muted-foreground text-sm mb-4">We'll scan new uploads and notify you when we find your photos</p>
+                  <h3 className="font-display font-semibold text-foreground mb-2">Get notified when photos are available</h3>
+                  <p className="text-muted-foreground text-sm mb-4">We'll scan new uploads and alert you</p>
                   <Button variant="hero" size="default" onClick={handleNotifyMe}>
-                    <Bell className="w-4 h-4" />
-                    Notify Me
+                    <Bell className="w-4 h-4" /> Notify Me
                   </Button>
                 </motion.div>
               )}
 
               {hasNotifyRequest && viewMode === "results" && matchedPhotos.length === 0 && (
                 <div className="bg-primary/5 border border-primary/10 rounded-xl p-4 text-center mb-6">
-                  <p className="text-sm text-muted-foreground">
-                    🔔 You'll be notified when new photos of you are uploaded
-                  </p>
+                  <p className="text-sm text-muted-foreground">🔔 You'll be notified when new photos match</p>
                 </div>
               )}
             </motion.div>
 
-            {displayPhotos.length > 0 && (
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 md:gap-4">
-                {displayPhotos.map(({ photo, confidence }, i) => (
-                  <motion.div
-                    key={photo.id}
-                    initial={{ opacity: 0, scale: 0.95 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    transition={{ delay: i * 0.03 }}
-                    className="relative group aspect-[4/3] rounded-xl overflow-hidden bg-secondary"
-                  >
-                    <img src={photo.image_url} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" loading="lazy" />
+            {visiblePhotos.length > 0 && (
+              <>
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 md:gap-4">
+                  {visiblePhotos.map(({ photo, confidence }, i) => (
+                    <motion.div
+                      key={photo.id}
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      transition={{ delay: Math.min(i * 0.03, 0.3) }}
+                      className="relative group aspect-[4/3] rounded-xl overflow-hidden bg-secondary cursor-pointer"
+                      onClick={() => setLightboxIndex(i)}
+                    >
+                      <img src={photo.image_url} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" loading="lazy" />
 
-                    {/* Confidence badge (non-admin) */}
-                    {viewMode !== "admin-gallery" && (
-                      <div className="absolute top-2 right-2 bg-background/70 backdrop-blur-sm rounded-lg px-2 py-0.5 text-xs font-display font-semibold text-primary">
-                        {confidence}%
-                      </div>
-                    )}
+                      {/* Confidence badge */}
+                      {viewMode !== "admin-gallery" && (
+                        <div className="absolute top-2 right-2 bg-background/70 backdrop-blur-sm rounded-lg px-2 py-0.5 text-xs font-display font-semibold text-primary">
+                          {confidence}%
+                        </div>
+                      )}
 
-                    <div className="absolute inset-0 bg-gradient-to-t from-background/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-                    <div className="absolute bottom-2 left-2 right-2 flex justify-between opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-                      <div className="flex gap-1">
-                        <button className="p-2 bg-background/60 backdrop-blur-sm rounded-lg text-foreground hover:text-primary transition-colors">
-                          <Heart className="w-4 h-4" />
-                        </button>
-                        <button onClick={() => handleShareWhatsApp(photo.image_url)} className="p-2 bg-background/60 backdrop-blur-sm rounded-lg text-foreground hover:text-primary transition-colors">
-                          <Share2 className="w-4 h-4" />
+                      {/* Favorite indicator */}
+                      {favorites.has(photo.id) && (
+                        <div className="absolute top-2 left-2">
+                          <Heart className="w-4 h-4 fill-primary text-primary" />
+                        </div>
+                      )}
+
+                      {/* New photo indicator */}
+                      {new Date(photo.created_at).getTime() > Date.now() - 86400000 && (
+                        <div className="absolute top-2 left-2 bg-primary/90 text-primary-foreground text-xs px-1.5 py-0.5 rounded font-display font-semibold">
+                          NEW
+                        </div>
+                      )}
+
+                      <div className="absolute inset-0 bg-gradient-to-t from-background/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+                      <div className="absolute bottom-2 left-2 right-2 flex justify-between opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                        <div className="flex gap-1">
+                          <button onClick={(e) => { e.stopPropagation(); toggleFavorite(photo.id); }} className="p-2 bg-background/60 backdrop-blur-sm rounded-lg text-foreground hover:text-primary transition-colors">
+                            <Heart className={`w-4 h-4 ${favorites.has(photo.id) ? "fill-primary text-primary" : ""}`} />
+                          </button>
+                          <button onClick={(e) => { e.stopPropagation(); handleShareWhatsApp(photo.image_url); }} className="p-2 bg-background/60 backdrop-blur-sm rounded-lg text-foreground hover:text-primary transition-colors">
+                            <Share2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                        <button onClick={(e) => { e.stopPropagation(); handleDownloadSingle(photo.image_url, i); }} className="p-2 bg-background/60 backdrop-blur-sm rounded-lg text-foreground hover:text-primary transition-colors">
+                          <Download className="w-4 h-4" />
                         </button>
                       </div>
-                      <button onClick={() => handleDownloadSingle(photo.image_url, i)} className="p-2 bg-background/60 backdrop-blur-sm rounded-lg text-foreground hover:text-primary transition-colors">
-                        <Download className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </motion.div>
-                ))}
-              </div>
+                    </motion.div>
+                  ))}
+                </div>
+
+                {/* Load More */}
+                {visibleCount < displayPhotos.length && (
+                  <div className="text-center mt-8">
+                    <Button variant="glass" size="lg" onClick={loadMore}>
+                      Show More ({displayPhotos.length - visibleCount} remaining)
+                    </Button>
+                  </div>
+                )}
+              </>
             )}
           </>
         )}
