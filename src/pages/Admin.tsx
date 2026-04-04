@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Plus, Upload, Image, Calendar, Trash2, Brain, CheckCircle, XCircle, Clock, CreditCard,
-  Users, BarChart3, AlertTriangle, Eye
+  Users, BarChart3, AlertTriangle, Eye, RefreshCw
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,6 +17,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { QRCodeSVG } from "qrcode.react";
 
 type AdminTab = "events" | "approvals" | "users" | "stats";
+type BulkAction = "delete-all-events" | "delete-all-photos" | "reset-app" | null;
 
 interface EventRow {
   id: string;
@@ -68,6 +69,8 @@ const Admin = () => {
   const [uploadingEventId, setUploadingEventId] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [bulkAction, setBulkAction] = useState<BulkAction>(null);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [totalPhotos, setTotalPhotos] = useState(0);
   const [totalFacesCount, setTotalFacesCount] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -192,49 +195,44 @@ const Admin = () => {
     setConfirmDeleteId(eventId);
   };
 
+  // Cascading delete for a single event
+  const deleteEventCascade = async (eventId: string) => {
+    const { data: photos } = await supabase.from("photos").select("id, image_url").eq("event_id", eventId);
+
+    if (photos && photos.length > 0) {
+      const photoIds = photos.map(p => p.id);
+      for (let i = 0; i < photoIds.length; i += 100) {
+        await supabase.from("faces").delete().in("photo_id", photoIds.slice(i, i + 100));
+      }
+
+      const storagePaths = photos
+        .map(p => {
+          const match = p.image_url.match(/event-photos\/(.+?)(\?|$)/);
+          return match ? match[1] : null;
+        })
+        .filter(Boolean) as string[];
+
+      if (storagePaths.length > 0) {
+        for (let i = 0; i < storagePaths.length; i += 100) {
+          await supabase.storage.from("event-photos").remove(storagePaths.slice(i, i + 100));
+        }
+      }
+
+      await supabase.from("photos").delete().eq("event_id", eventId);
+    }
+
+    await supabase.from("photo_requests").delete().eq("event_id", eventId);
+    await supabase.from("notifications").delete().eq("event_id", eventId);
+    await supabase.from("events").delete().eq("id", eventId);
+  };
+
   const confirmRejectAndDelete = async () => {
     if (!confirmDeleteId) return;
     const eventId = confirmDeleteId;
     setConfirmDeleteId(null);
 
     try {
-      // 1. Get all photos for this event
-      const { data: photos } = await supabase.from("photos").select("id, image_url").eq("event_id", eventId);
-      
-      if (photos && photos.length > 0) {
-        const photoIds = photos.map(p => p.id);
-        
-        // 2. Delete face descriptors
-        for (let i = 0; i < photoIds.length; i += 100) {
-          await supabase.from("faces").delete().in("photo_id", photoIds.slice(i, i + 100));
-        }
-        
-        // 3. Delete photos from storage
-        const storagePaths = photos
-          .map(p => {
-            const url = p.image_url;
-            const match = url.match(/event-photos\/(.+?)(\?|$)/);
-            return match ? match[1] : null;
-          })
-          .filter(Boolean) as string[];
-
-        if (storagePaths.length > 0) {
-          await supabase.storage.from("event-photos").remove(storagePaths);
-        }
-        
-        // 4. Delete photo rows
-        await supabase.from("photos").delete().eq("event_id", eventId);
-      }
-      
-      // 5. Delete photo requests
-      await supabase.from("photo_requests").delete().eq("event_id", eventId);
-      
-      // 6. Delete notifications
-      await supabase.from("notifications").delete().eq("event_id", eventId);
-      
-      // 7. Delete event
-      await supabase.from("events").delete().eq("id", eventId);
-      
+      await deleteEventCascade(eventId);
       toast({ title: "Event rejected & deleted ❌", description: "All associated data has been removed" });
       fetchAllPendingEvents();
       fetchAllEvents();
@@ -255,29 +253,7 @@ const Admin = () => {
     setConfirmDeleteId(null);
 
     try {
-      const { data: photos } = await supabase.from("photos").select("id, image_url").eq("event_id", eventId);
-      
-      if (photos && photos.length > 0) {
-        const photoIds = photos.map(p => p.id);
-        for (let i = 0; i < photoIds.length; i += 100) {
-          await supabase.from("faces").delete().in("photo_id", photoIds.slice(i, i + 100));
-        }
-        const storagePaths = photos
-          .map(p => {
-            const match = p.image_url.match(/event-photos\/(.+?)(\?|$)/);
-            return match ? match[1] : null;
-          })
-          .filter(Boolean) as string[];
-        if (storagePaths.length > 0) {
-          await supabase.storage.from("event-photos").remove(storagePaths);
-        }
-        await supabase.from("photos").delete().eq("event_id", eventId);
-      }
-      
-      await supabase.from("photo_requests").delete().eq("event_id", eventId);
-      await supabase.from("notifications").delete().eq("event_id", eventId);
-      await supabase.from("events").delete().eq("id", eventId);
-      
+      await deleteEventCascade(eventId);
       toast({ title: "Event deleted" });
       fetchEvents(user!.id);
       if (isAdmin) {
@@ -287,6 +263,115 @@ const Admin = () => {
     } catch {
       toast({ title: "Error deleting event", variant: "destructive" });
     }
+  };
+
+  // ── Bulk admin actions ──
+
+  const handleBulkDeleteAllEvents = async () => {
+    setBulkDeleting(true);
+    try {
+      const { data: allEvts } = await supabase.from("events").select("id");
+      if (allEvts) {
+        for (const evt of allEvts) {
+          await deleteEventCascade(evt.id);
+        }
+      }
+      toast({ title: "All events deleted ✅", description: "All events, photos, and face data removed" });
+      fetchEvents(user!.id);
+      fetchAllEvents();
+      fetchAllPendingEvents();
+      fetchGlobalStats();
+    } catch (err) {
+      console.error(err);
+      toast({ title: "Error", description: "Failed to delete all events", variant: "destructive" });
+    }
+    setBulkDeleting(false);
+    setBulkAction(null);
+  };
+
+  const handleBulkDeleteAllPhotos = async () => {
+    setBulkDeleting(true);
+    try {
+      // Delete all faces
+      const { data: allFacesData } = await supabase.from("faces").select("id");
+      if (allFacesData && allFacesData.length > 0) {
+        for (let i = 0; i < allFacesData.length; i += 100) {
+          const ids = allFacesData.slice(i, i + 100).map(f => f.id);
+          await supabase.from("faces").delete().in("id", ids);
+        }
+      }
+
+      // Get all photos for storage cleanup
+      const { data: allPhotosData } = await supabase.from("photos").select("id, image_url");
+      if (allPhotosData && allPhotosData.length > 0) {
+        const storagePaths = allPhotosData
+          .map(p => {
+            const match = p.image_url.match(/event-photos\/(.+?)(\?|$)/);
+            return match ? match[1] : null;
+          })
+          .filter(Boolean) as string[];
+
+        if (storagePaths.length > 0) {
+          for (let i = 0; i < storagePaths.length; i += 100) {
+            await supabase.storage.from("event-photos").remove(storagePaths.slice(i, i + 100));
+          }
+        }
+
+        // Delete photo records
+        for (let i = 0; i < allPhotosData.length; i += 100) {
+          const ids = allPhotosData.slice(i, i + 100).map(p => p.id);
+          await supabase.from("photos").delete().in("id", ids);
+        }
+      }
+
+      toast({ title: "All photos deleted ✅", description: "Storage, photos table, and faces cleared" });
+      fetchEvents(user!.id);
+      fetchGlobalStats();
+    } catch (err) {
+      console.error(err);
+      toast({ title: "Error", description: "Failed to delete all photos", variant: "destructive" });
+    }
+    setBulkDeleting(false);
+    setBulkAction(null);
+  };
+
+  const handleResetApp = async () => {
+    setBulkDeleting(true);
+    try {
+      // Delete everything except profiles
+      const { data: allEvts } = await supabase.from("events").select("id");
+      if (allEvts) {
+        for (const evt of allEvts) {
+          await deleteEventCascade(evt.id);
+        }
+      }
+      // Also clean up any orphan photo_requests/notifications
+      toast({ title: "App reset complete ✅", description: "All events, photos, and face data cleared. Users preserved." });
+      fetchEvents(user!.id);
+      fetchAllEvents();
+      fetchAllPendingEvents();
+      fetchUsers();
+      fetchGlobalStats();
+    } catch (err) {
+      console.error(err);
+      toast({ title: "Error", description: "Reset failed", variant: "destructive" });
+    }
+    setBulkDeleting(false);
+    setBulkAction(null);
+  };
+
+  const executeBulkAction = () => {
+    switch (bulkAction) {
+      case "delete-all-events": return handleBulkDeleteAllEvents();
+      case "delete-all-photos": return handleBulkDeleteAllPhotos();
+      case "reset-app": return handleResetApp();
+    }
+  };
+
+  const bulkActionLabels: Record<string, { title: string; desc: string }> = {
+    "delete-all-events": { title: "Delete All Events", desc: "This will permanently delete ALL events, their photos, face data, and notifications." },
+    "delete-all-photos": { title: "Delete All Photos", desc: "This will delete ALL photos from storage and database, and all face descriptors." },
+    "reset-app": { title: "Reset App Data", desc: "This will delete ALL events, photos, and face data. User accounts will be preserved." },
   };
 
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -327,7 +412,6 @@ const Admin = () => {
       setUploadProgress(`Uploaded ${uploaded}/${totalFiles}`);
     }
 
-    // Face detection
     let totalFaces = 0;
     setUploadProgress(`Detecting faces...`);
     const urls = uploadedPhotos.map(p => p.url);
@@ -386,7 +470,7 @@ const Admin = () => {
       <Navbar />
       <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handlePhotoUpload} />
 
-      {/* Confirm delete dialog */}
+      {/* Confirm single delete dialog */}
       <AnimatePresence>
         {confirmDeleteId && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
@@ -394,13 +478,34 @@ const Admin = () => {
               <AlertTriangle className="w-10 h-10 text-destructive mx-auto mb-4" />
               <h3 className="font-display font-semibold text-lg text-center mb-2">Confirm Delete</h3>
               <p className="text-muted-foreground text-sm text-center mb-6">
-                This will permanently delete the event, all photos, face data, and notifications. This cannot be undone.
+                Are you sure? This will permanently delete the event, all photos, face data, and notifications. This action cannot be undone.
               </p>
               <div className="flex gap-3">
                 <Button variant="ghost" className="flex-1" onClick={() => setConfirmDeleteId(null)}>Cancel</Button>
                 <Button variant="destructive" className="flex-1" onClick={tab === "approvals" ? confirmRejectAndDelete : confirmDelete}>
                   <Trash2 className="w-4 h-4" />
                   Delete Everything
+                </Button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Bulk action confirmation dialog */}
+      <AnimatePresence>
+        {bulkAction && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} exit={{ scale: 0.9 }} className="bg-card border border-border rounded-2xl p-6 max-w-sm w-full shadow-card">
+              <AlertTriangle className="w-10 h-10 text-destructive mx-auto mb-4" />
+              <h3 className="font-display font-semibold text-lg text-center mb-2">{bulkActionLabels[bulkAction]?.title}</h3>
+              <p className="text-muted-foreground text-sm text-center mb-6">
+                {bulkActionLabels[bulkAction]?.desc} This action cannot be undone.
+              </p>
+              <div className="flex gap-3">
+                <Button variant="ghost" className="flex-1" onClick={() => setBulkAction(null)} disabled={bulkDeleting}>Cancel</Button>
+                <Button variant="destructive" className="flex-1" onClick={executeBulkAction} disabled={bulkDeleting}>
+                  {bulkDeleting ? <><RefreshCw className="w-4 h-4 animate-spin" /> Deleting...</> : <><Trash2 className="w-4 h-4" /> Confirm</>}
                 </Button>
               </div>
             </motion.div>
@@ -512,6 +617,21 @@ const Admin = () => {
           </div>
         )}
 
+        {/* Admin bulk actions */}
+        {isAdmin && (
+          <div className="flex flex-wrap gap-2 mb-6">
+            <Button variant="glass" size="sm" className="border-destructive/30 text-destructive hover:bg-destructive/10" onClick={() => setBulkAction("delete-all-events")}>
+              <Trash2 className="w-3.5 h-3.5" /> Delete All Events
+            </Button>
+            <Button variant="glass" size="sm" className="border-destructive/30 text-destructive hover:bg-destructive/10" onClick={() => setBulkAction("delete-all-photos")}>
+              <Trash2 className="w-3.5 h-3.5" /> Delete All Photos
+            </Button>
+            <Button variant="glass" size="sm" className="border-destructive/30 text-destructive hover:bg-destructive/10" onClick={() => setBulkAction("reset-app")}>
+              <AlertTriangle className="w-3.5 h-3.5" /> Reset App Data
+            </Button>
+          </div>
+        )}
+
         {/* My stats */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
           {myStats.map((s, i) => (
@@ -562,7 +682,7 @@ const Admin = () => {
               </div>
             ) : (
               <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {events.map((event) => (
+                {(isAdmin ? allEvents : events).map((event) => (
                   <motion.div key={event.id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="relative group">
                     {event.status === "pending" && (
                       <div className="absolute inset-0 z-10 bg-background/70 backdrop-blur-sm rounded-2xl flex flex-col items-center justify-center">
@@ -586,16 +706,16 @@ const Admin = () => {
                       eventCode={event.event_code}
                     />
                     <div className="absolute top-3 left-3 z-20">{getStatusBadge(event.status)}</div>
-                    {event.status === "approved" && (
-                      <div className="absolute top-3 right-3 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity z-20">
+                    <div className="absolute top-3 right-3 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity z-20">
+                      {event.status === "approved" && (
                         <button onClick={() => { setUploadingEventId(event.id); fileInputRef.current?.click(); }} className="p-2 bg-primary rounded-lg text-primary-foreground hover:bg-primary/80 transition-colors" title="Upload photos">
                           <Upload className="w-4 h-4" />
                         </button>
-                        <button onClick={() => handleDeleteEvent(event.id)} className="p-2 bg-destructive rounded-lg text-destructive-foreground hover:bg-destructive/80 transition-colors" title="Delete event">
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    )}
+                      )}
+                      <button onClick={() => handleDeleteEvent(event.id)} className="p-2 bg-destructive rounded-lg text-destructive-foreground hover:bg-destructive/80 transition-colors" title="Delete event">
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
                   </motion.div>
                 ))}
               </div>
