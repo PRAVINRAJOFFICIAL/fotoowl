@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useParams } from "react-router-dom";
-import { Upload, Camera, Search, Download, Heart, Share2, Image as ImageIcon, ArrowLeft, Loader2, Brain, AlertCircle, Bell, Plus, CheckCircle2, RotateCcw, Sparkles } from "lucide-react";
+import { Upload, Camera, Search, Download, Heart, Share2, Image as ImageIcon, ArrowLeft, Loader2, Brain, AlertCircle, Bell, RotateCcw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Link } from "react-router-dom";
@@ -14,7 +14,6 @@ import { saveAs } from "file-saver";
 import {
   loadFaceModels,
   detectSelfie,
-  detectMultiSelfie,
   matchFaces,
   type SelfieResult,
   type MatchCandidate,
@@ -22,7 +21,7 @@ import {
 import { useAuth } from "@/contexts/AuthContext";
 import PhotoLightbox from "@/components/PhotoLightbox";
 
-type ViewMode = "prompt" | "selfie" | "results" | "admin-gallery";
+type ViewMode = "prompt" | "searching" | "results" | "admin-gallery";
 
 interface PhotoRow {
   id: string;
@@ -39,15 +38,13 @@ interface EventRow {
   status: string;
 }
 
-const MAX_SELFIES = 3;
-const MIN_SELFIES = 2;
 const PHOTOS_PER_CHUNK = 12;
 
 const EventPage = () => {
   const { eventId } = useParams();
   const { user, isAdmin } = useAuth();
   const [viewMode, setViewMode] = useState<ViewMode>("prompt");
-  const [selfiePreviews, setSelfiePreviews] = useState<string[]>([]);
+  const [selfiePreview, setSelfiePreview] = useState<string | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [searchStatus, setSearchStatus] = useState("");
   const [showQR, setShowQR] = useState(false);
@@ -58,7 +55,7 @@ const EventPage = () => {
   const [downloading, setDownloading] = useState(false);
   const [selfieError, setSelfieError] = useState<string | null>(null);
   const [hasNotifyRequest, setHasNotifyRequest] = useState(false);
-  const [lastDescriptors, setLastDescriptors] = useState<Float32Array[] | null>(null);
+  const [lastDescriptor, setLastDescriptor] = useState<Float32Array | null>(null);
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [visibleCount, setVisibleCount] = useState(PHOTOS_PER_CHUNK);
@@ -74,7 +71,6 @@ const EventPage = () => {
     if (eventId) fetchEvent();
   }, [eventId]);
 
-  // Load favorites from localStorage
   useEffect(() => {
     const saved = localStorage.getItem(`favorites_${eventId}`);
     if (saved) setFavorites(new Set(JSON.parse(saved)));
@@ -154,57 +150,43 @@ const EventPage = () => {
 
   const handleSelfieUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || selfiePreviews.length >= MAX_SELFIES) return;
+    if (!file) return;
 
     setSelfieError(null);
+    setSearchStatus("Checking face quality...");
 
     const reader = new FileReader();
     reader.onload = async (ev) => {
       const dataUrl = ev.target?.result as string;
 
-      setSearchStatus("Checking face quality...");
       const result = await detectSelfie(dataUrl);
 
       if (!result) {
-        setSelfieError("No clear face detected. Use a well-lit, frontal photo with one face visible.");
+        setSelfieError("No clear face detected ⚠️ Use a well-lit, frontal photo with one face visible.");
         setSearchStatus("");
         if (fileInputRef.current) fileInputRef.current.value = "";
         return;
       }
 
       setSearchStatus("");
-      setSelfiePreviews(prev => [...prev, dataUrl]);
-      if (selfiePreviews.length === 0) setViewMode("selfie");
+      setSelfiePreview(dataUrl);
+      // Auto-start search
+      startSearch(dataUrl, result);
     };
     reader.readAsDataURL(file);
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
-  const removeSelfie = (index: number) => {
-    setSelfiePreviews(prev => prev.filter((_, i) => i !== index));
-    setSelfieError(null);
-    if (selfiePreviews.length <= 1) setViewMode("prompt");
-  };
+  const startSearch = async (dataUrl: string, selfieResult: SelfieResult) => {
+    if (!event) return;
 
-  const handleFindPhotos = async () => {
-    if (selfiePreviews.length < MIN_SELFIES || !event) return;
-
+    setViewMode("searching");
     setIsSearching(true);
     setSelfieError(null);
 
     try {
-      setSearchStatus("Analyzing your selfies...");
-      const multiResult = await detectMultiSelfie(selfiePreviews);
-
-      if (!multiResult) {
-        setSelfieError("Could not detect a clear face in all selfies. Please retake.");
-        setIsSearching(false);
-        setSearchStatus("");
-        return;
-      }
-
-      const selfieDescriptors = [multiResult.averaged, ...multiResult.individual.map(r => r.descriptor)];
-      setLastDescriptors(selfieDescriptors);
+      const descriptor = selfieResult.descriptor;
+      setLastDescriptor(descriptor);
 
       setSearchStatus("Loading face data...");
       const photoIds = allPhotos.map((p) => p.id);
@@ -230,9 +212,9 @@ const EventPage = () => {
         }
       }
 
-      setSearchStatus("AI is finding your photos...");
+      setSearchStatus("Finding your photos...");
 
-      const matches = matchFaces(selfieDescriptors, allFaces, 0.45, 10);
+      const matches = matchFaces([descriptor], allFaces, 0.5);
 
       const matchedMap = new Map(allPhotos.map((p) => [p.id, p]));
       const matched = matches
@@ -249,11 +231,12 @@ const EventPage = () => {
       if (matched.length > 0) {
         toast({ title: `Found ${matched.length} photos of you! 🎉` });
       } else {
-        toast({ title: "No photos found 😢", description: "Try different selfies or check back later" });
+        toast({ title: "No photos found 😢", description: "Try a different selfie or check back later" });
       }
     } catch (err) {
       console.error("Face matching error:", err);
       toast({ title: "Error", description: "Face recognition failed. Please try again.", variant: "destructive" });
+      setViewMode("prompt");
     }
 
     setIsSearching(false);
@@ -261,12 +244,12 @@ const EventPage = () => {
   };
 
   const handleNotifyMe = async () => {
-    if (!event || !user || !lastDescriptors) return;
+    if (!event || !user || !lastDescriptor) return;
 
     const { error } = await supabase.from("photo_requests").insert({
       user_id: user.id,
       event_id: event.id,
-      face_descriptor: Array.from(lastDescriptors[0]),
+      face_descriptor: Array.from(lastDescriptor),
     });
 
     if (error) {
@@ -316,9 +299,9 @@ const EventPage = () => {
 
   const resetSearch = () => {
     setViewMode("prompt");
-    setSelfiePreviews([]);
+    setSelfiePreview(null);
     setMatchedPhotos([]);
-    setLastDescriptors(null);
+    setLastDescriptor(null);
     setSelfieError(null);
     setVisibleCount(PHOTOS_PER_CHUNK);
   };
@@ -366,7 +349,6 @@ const EventPage = () => {
     <div className="min-h-screen bg-gradient-dark">
       <Navbar />
 
-      {/* Photo Lightbox */}
       {lightboxIndex !== null && (
         <PhotoLightbox
           photos={displayPhotos.map(d => d.photo)}
@@ -420,7 +402,7 @@ const EventPage = () => {
           )}
         </AnimatePresence>
 
-        {/* PROMPT: Upload selfies */}
+        {/* PROMPT: Upload selfie */}
         {viewMode === "prompt" && (
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="max-w-lg mx-auto py-12">
             <div className="bg-gradient-card border border-border rounded-2xl p-8 shadow-card text-center">
@@ -428,7 +410,7 @@ const EventPage = () => {
                 <Camera className="w-8 h-8 text-primary" />
               </div>
               <h2 className="font-display font-semibold text-xl text-foreground mb-2">Find Your Photos</h2>
-              <p className="text-muted-foreground text-sm mb-1">Upload {MIN_SELFIES}–{MAX_SELFIES} selfies for AI double-validation</p>
+              <p className="text-muted-foreground text-sm mb-1">Upload your selfie to find your photos</p>
               <p className="text-muted-foreground text-xs mb-6">📸 Well-lit, frontal — look straight at camera</p>
 
               {selfieError && (
@@ -445,32 +427,17 @@ const EventPage = () => {
                 </div>
               )}
 
-              {selfiePreviews.length > 0 && (
-                <div className="flex gap-3 justify-center mb-6">
-                  {selfiePreviews.map((preview, i) => (
-                    <motion.div key={i} initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="relative">
-                      <img src={preview} alt={`Selfie ${i + 1}`} className="w-20 h-20 rounded-xl object-cover border-2 border-primary/30" />
-                      <button
-                        onClick={() => removeSelfie(i)}
-                        className="absolute -top-2 -right-2 bg-destructive rounded-full w-5 h-5 flex items-center justify-center text-destructive-foreground text-xs"
-                      >
-                        ×
-                      </button>
-                      <CheckCircle2 className="absolute -bottom-1 -right-1 w-4 h-4 text-primary" />
-                    </motion.div>
-                  ))}
+              {selfiePreview && (
+                <div className="flex justify-center mb-6">
+                  <img src={selfiePreview} alt="Your selfie" className="w-24 h-24 rounded-2xl object-cover border-2 border-primary/30" />
                 </div>
               )}
 
               <label className="cursor-pointer">
-                <Button variant={selfiePreviews.length === 0 ? "hero" : "glass"} size="lg" className="w-full" asChild>
+                <Button variant="hero" size="lg" className="w-full" asChild>
                   <span>
-                    {selfiePreviews.length === 0 ? <Upload className="w-5 h-5" /> : <Plus className="w-5 h-5" />}
-                    {selfiePreviews.length === 0
-                      ? "Upload First Selfie"
-                      : selfiePreviews.length < MAX_SELFIES
-                        ? `Add Selfie (${selfiePreviews.length}/${MAX_SELFIES})`
-                        : `${MAX_SELFIES} selfies added ✓`}
+                    <Upload className="w-5 h-5" />
+                    Upload Your Selfie
                   </span>
                 </Button>
                 <input
@@ -480,75 +447,39 @@ const EventPage = () => {
                   capture="user"
                   className="hidden"
                   onChange={handleSelfieUpload}
-                  disabled={selfiePreviews.length >= MAX_SELFIES}
                 />
               </label>
-
-              {selfiePreviews.length >= MIN_SELFIES && (
-                <motion.div initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }}>
-                  <Button variant="hero" size="lg" className="w-full mt-3" onClick={() => setViewMode("selfie")}>
-                    <Search className="w-5 h-5" /> Continue to Find Photos
-                  </Button>
-                </motion.div>
-              )}
             </div>
           </motion.div>
         )}
 
-        {/* SELFIE: Review + find */}
-        {viewMode === "selfie" && (
-          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="max-w-lg mx-auto mb-12">
+        {/* SEARCHING */}
+        {viewMode === "searching" && (
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="max-w-lg mx-auto py-12">
             <div className="bg-gradient-card border border-border rounded-2xl p-8 shadow-card text-center">
-              <Sparkles className="w-8 h-8 text-primary mx-auto mb-3" />
-              <h2 className="font-display font-semibold text-xl text-foreground mb-2">Your Selfies ({selfiePreviews.length})</h2>
-              <p className="text-muted-foreground text-sm mb-6">AI will cross-validate all selfies for maximum accuracy</p>
+              <Sparkles className="w-10 h-10 text-primary mx-auto mb-4 animate-pulse" />
+              <h2 className="font-display font-semibold text-xl text-foreground mb-2">Finding Your Photos...</h2>
 
-              <div className="flex gap-3 justify-center mb-6">
-                {selfiePreviews.map((preview, i) => (
-                  <div key={i} className="relative">
-                    <img src={preview} alt={`Selfie ${i + 1}`} className="w-24 h-24 rounded-2xl object-cover border-2 border-primary/30" />
-                    <div className="absolute -bottom-1 -right-1 bg-primary text-primary-foreground rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold">
-                      {i + 1}
-                    </div>
-                  </div>
-                ))}
+              {selfiePreview && (
+                <div className="flex justify-center mb-6">
+                  <img src={selfiePreview} alt="Your selfie" className="w-20 h-20 rounded-2xl object-cover border-2 border-primary/30" />
+                </div>
+              )}
+
+              <div className="mb-4">
+                <div className="flex items-center gap-2 text-primary text-sm justify-center mb-3">
+                  <Brain className="w-4 h-4 animate-pulse" />
+                  {searchStatus || "Scanning photos..."}
+                </div>
+                <div className="w-full bg-secondary rounded-full h-1.5 overflow-hidden">
+                  <motion.div
+                    className="h-full bg-primary rounded-full"
+                    initial={{ width: "0%" }}
+                    animate={{ width: "85%" }}
+                    transition={{ duration: 4, ease: "easeInOut" }}
+                  />
+                </div>
               </div>
-
-              {selfieError && (
-                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex items-center gap-2 text-destructive text-sm mb-4 justify-center bg-destructive/10 p-3 rounded-lg">
-                  <AlertCircle className="w-4 h-4" />
-                  {selfieError}
-                </motion.div>
-              )}
-
-              {isSearching && searchStatus && (
-                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mb-4">
-                  <div className="flex items-center gap-2 text-primary text-sm justify-center mb-2">
-                    <Brain className="w-4 h-4 animate-pulse" />
-                    {searchStatus}
-                  </div>
-                  <div className="w-full bg-secondary rounded-full h-1.5 overflow-hidden">
-                    <motion.div
-                      className="h-full bg-primary rounded-full"
-                      initial={{ width: "0%" }}
-                      animate={{ width: "80%" }}
-                      transition={{ duration: 3, ease: "easeInOut" }}
-                    />
-                  </div>
-                </motion.div>
-              )}
-
-              <Button variant="hero" size="lg" className="w-full" disabled={isSearching} onClick={handleFindPhotos}>
-                {isSearching ? (
-                  <><Loader2 className="w-5 h-5 animate-spin" /> Scanning with AI...</>
-                ) : (
-                  <><Search className="w-5 h-5" /> Find My Photos</>
-                )}
-              </Button>
-
-              <Button variant="ghost" size="sm" className="w-full mt-3" onClick={resetSearch}>
-                Cancel
-              </Button>
             </div>
           </motion.div>
         )}
@@ -565,13 +496,11 @@ const EventPage = () => {
                     </span>
                   ) : (
                     <>
-                      <div className="flex -space-x-2">
-                        {selfiePreviews.slice(0, 3).map((p, i) => (
-                          <div key={i} className="w-8 h-8 rounded-full overflow-hidden border-2 border-primary flex-shrink-0">
-                            <img src={p} alt="" className="w-full h-full object-cover" />
-                          </div>
-                        ))}
-                      </div>
+                      {selfiePreview && (
+                        <div className="w-8 h-8 rounded-full overflow-hidden border-2 border-primary flex-shrink-0">
+                          <img src={selfiePreview} alt="" className="w-full h-full object-cover" />
+                        </div>
+                      )}
                       <span className="text-sm text-foreground font-display">
                         {matchedPhotos.length > 0 ? (
                           <>Found <strong className="text-primary">{matchedPhotos.length} photos</strong> of you 🎉</>
@@ -585,7 +514,7 @@ const EventPage = () => {
                 <div className="flex flex-wrap gap-2">
                   {viewMode !== "admin-gallery" && (
                     <Button variant="glass" size="sm" onClick={resetSearch}>
-                      <RotateCcw className="w-4 h-4" /> Try Again
+                      <RotateCcw className="w-4 h-4" /> Upload Another Selfie
                     </Button>
                   )}
                   {displayPhotos.length > 0 && (
@@ -598,7 +527,7 @@ const EventPage = () => {
               </div>
 
               {/* Notify Me */}
-              {viewMode === "results" && matchedPhotos.length === 0 && user && lastDescriptors && !hasNotifyRequest && (
+              {viewMode === "results" && matchedPhotos.length === 0 && user && lastDescriptor && !hasNotifyRequest && (
                 <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="bg-gradient-card border border-border rounded-xl p-6 text-center mb-6">
                   <Bell className="w-8 h-8 text-primary mx-auto mb-3" />
                   <h3 className="font-display font-semibold text-foreground mb-2">Get notified when photos are available</h3>
@@ -630,21 +559,18 @@ const EventPage = () => {
                     >
                       <img src={photo.image_url} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" loading="lazy" />
 
-                      {/* Confidence badge */}
                       {viewMode !== "admin-gallery" && (
                         <div className="absolute top-2 right-2 bg-background/70 backdrop-blur-sm rounded-lg px-2 py-0.5 text-xs font-display font-semibold text-primary">
                           {confidence}%
                         </div>
                       )}
 
-                      {/* Favorite indicator */}
                       {favorites.has(photo.id) && (
                         <div className="absolute top-2 left-2">
                           <Heart className="w-4 h-4 fill-primary text-primary" />
                         </div>
                       )}
 
-                      {/* New photo indicator */}
                       {new Date(photo.created_at).getTime() > Date.now() - 86400000 && (
                         <div className="absolute top-2 left-2 bg-primary/90 text-primary-foreground text-xs px-1.5 py-0.5 rounded font-display font-semibold">
                           NEW
@@ -669,7 +595,6 @@ const EventPage = () => {
                   ))}
                 </div>
 
-                {/* Load More */}
                 {visibleCount < displayPhotos.length && (
                   <div className="text-center mt-8">
                     <Button variant="glass" size="lg" onClick={loadMore}>

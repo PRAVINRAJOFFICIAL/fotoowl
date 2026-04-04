@@ -79,17 +79,6 @@ export function euclideanDistance(a: Float32Array | number[], b: Float32Array | 
   return Math.sqrt(sum);
 }
 
-export function averageDescriptors(descriptors: Float32Array[]): Float32Array {
-  if (descriptors.length === 0) return new Float32Array(128);
-  if (descriptors.length === 1) return descriptors[0];
-  const avg = new Float32Array(128);
-  for (const d of descriptors) {
-    for (let i = 0; i < 128; i++) avg[i] += d[i];
-  }
-  for (let i = 0; i < 128; i++) avg[i] /= descriptors.length;
-  return normalizeDescriptor(avg);
-}
-
 /** Convert distance to confidence percentage (0.0 → 100%, 0.55 → 0%) */
 export function distanceToConfidence(distance: number): number {
   return Math.max(0, Math.min(100, Math.round((1 - distance / 0.55) * 100)));
@@ -97,7 +86,7 @@ export function distanceToConfidence(distance: number): number {
 
 // ── Detection ──
 
-const MIN_FACE_SIZE = 60; // px — ignore tiny faces
+const MIN_FACE_SIZE = 60;
 
 export async function detectFaces(imageUrl: string): Promise<Float32Array[]> {
   await loadFaceModels();
@@ -182,24 +171,6 @@ export async function detectSelfie(imageDataUrl: string): Promise<SelfieResult |
   };
 }
 
-export async function detectMultiSelfie(imageDataUrls: string[]): Promise<{
-  averaged: Float32Array;
-  individual: SelfieResult[];
-} | null> {
-  const results: SelfieResult[] = [];
-
-  for (const url of imageDataUrls) {
-    const result = await detectSelfie(url);
-    if (!result) return null;
-    results.push(result);
-  }
-
-  if (results.length === 0) return null;
-
-  const averaged = averageDescriptors(results.map(r => r.descriptor));
-  return { averaged, individual: results };
-}
-
 // ── Matching ──
 
 export interface MatchCandidate {
@@ -208,97 +179,56 @@ export interface MatchCandidate {
   confidence: number;
 }
 
-const PRIMARY_THRESHOLD = 0.45;
-const FALLBACK_THRESHOLD = 0.50;
-
 /**
- * Strict face matching with:
- * - Primary threshold 0.45, fallback 0.50
- * - Double validation (all selfies must match)
- * - Hard negative filter
- * - Min confidence 80%
- * - Top 10 initial results
+ * Simple single-selfie matching:
+ * - For each photo, pick the lowest distance face
+ * - Filter by threshold (default 0.5)
+ * - Filter by min confidence (75%)
+ * - Sort by distance ascending
  */
 export function matchFaces(
   selfieDescriptors: Float32Array[],
   storedFaces: { photo_id: string; descriptor: number[] }[],
-  threshold: number = PRIMARY_THRESHOLD,
-  maxResults: number = 10
+  threshold: number = 0.5,
+  maxResults: number = 50
 ): MatchCandidate[] {
   if (selfieDescriptors.length === 0 || storedFaces.length === 0) return [];
 
-  // For each selfie descriptor, compute best distance per photo
-  const allPhotoScores: Map<string, number>[] = [];
+  const selfieDesc = normalizeDescriptor(selfieDescriptors[0]);
+  const bestPerPhoto = new Map<string, number>();
 
-  for (const selfieDesc of selfieDescriptors) {
-    const normalized = normalizeDescriptor(selfieDesc);
-    const bestPerPhoto = new Map<string, number>();
+  for (const face of storedFaces) {
+    const normalizedFace = normalizeDescriptor(face.descriptor);
+    const distance = euclideanDistance(selfieDesc, normalizedFace);
 
-    for (const face of storedFaces) {
-      const normalizedFace = normalizeDescriptor(face.descriptor);
-      const distance = euclideanDistance(normalized, normalizedFace);
-
-      const current = bestPerPhoto.get(face.photo_id);
-      if (current === undefined || distance < current) {
-        bestPerPhoto.set(face.photo_id, distance);
-      }
+    const current = bestPerPhoto.get(face.photo_id);
+    if (current === undefined || distance < current) {
+      bestPerPhoto.set(face.photo_id, distance);
     }
-
-    allPhotoScores.push(bestPerPhoto);
-  }
-
-  // Double validation: ALL selfie descriptors must match within fallback threshold
-  const allPhotoIds = new Set<string>();
-  for (const scores of allPhotoScores) {
-    for (const id of scores.keys()) allPhotoIds.add(id);
   }
 
   const candidates: MatchCandidate[] = [];
 
-  for (const photoId of allPhotoIds) {
-    const distances: number[] = [];
-    let allMatch = true;
-
-    for (const scores of allPhotoScores) {
-      const dist = scores.get(photoId);
-      if (dist === undefined || dist > FALLBACK_THRESHOLD) {
-        allMatch = false;
-        break;
-      }
-      distances.push(dist);
-    }
-
-    if (!allMatch) continue;
-
-    const avgDist = distances.reduce((a, b) => a + b, 0) / distances.length;
-
-    // Primary threshold check on average
-    if (avgDist > threshold) continue;
-
-    const confidence = distanceToConfidence(avgDist);
-    if (confidence < 80) continue; // strict confidence filter
-
-    candidates.push({ photoId, distance: avgDist, confidence });
+  for (const [photoId, distance] of bestPerPhoto) {
+    if (distance > threshold) continue;
+    const confidence = distanceToConfidence(distance);
+    if (confidence < 75) continue;
+    candidates.push({ photoId, distance, confidence });
   }
 
-  // Sort by distance (best first)
   candidates.sort((a, b) => a.distance - b.distance);
 
-  // Hard negative filter: if top 2 are very close in distance, reject the weaker
+  // Hard negative filter
   if (candidates.length >= 2) {
     const diff = Math.abs(candidates[0].distance - candidates[1].distance);
-    if (diff < 0.015 && candidates[0].distance > 0.3) {
-      console.warn(`Hard negative filter: top 2 too close (diff=${diff.toFixed(4)}), removing weaker`);
+    if (diff < 0.015 && candidates[0].distance > 0.35) {
       candidates.splice(1, 1);
     }
   }
 
   const limited = candidates.slice(0, maxResults);
 
-  console.log(`Match stats: ${storedFaces.length} faces, ${allPhotoIds.size} photos, ${limited.length} matches (threshold: ${threshold})`);
-  for (const c of limited.slice(0, 5)) {
-    console.log(`  Photo ${c.photoId.slice(0, 8)}… dist: ${c.distance.toFixed(4)} conf: ${c.confidence}%`);
-  }
+  console.log(`Match: ${storedFaces.length} faces, ${bestPerPhoto.size} photos → ${limited.length} matches (threshold: ${threshold})`);
 
   return limited;
 }
