@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useParams } from "react-router-dom";
-import { Upload, Camera, Search, Download, Heart, Share2, Image as ImageIcon, ArrowLeft, Loader2, Brain, AlertCircle, Bell, RotateCcw, Sparkles } from "lucide-react";
+import { Upload, Camera, Search, Download, Heart, Share2, Image as ImageIcon, ArrowLeft, Loader2, Brain, AlertCircle, Bell, RotateCcw, Sparkles, Trash2, Pencil, Check, X, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Link } from "react-router-dom";
 import Navbar from "@/components/Navbar";
@@ -14,14 +15,14 @@ import { saveAs } from "file-saver";
 import {
   loadFaceModels,
   detectSelfie,
+  detectFacesBatch,
   matchFaces,
   type SelfieResult,
-  type MatchCandidate,
 } from "@/lib/faceRecognition";
 import { useAuth } from "@/contexts/AuthContext";
 import PhotoLightbox from "@/components/PhotoLightbox";
 
-type ViewMode = "prompt" | "searching" | "results" | "admin-gallery";
+type ViewMode = "prompt" | "searching" | "results" | "owner-gallery";
 
 interface PhotoRow {
   id: string;
@@ -36,9 +37,18 @@ interface EventRow {
   event_code: string;
   cover_image: string | null;
   status: string;
+  created_by: string | null;
+  selected_plan: string;
+  payment_status: string;
 }
 
 const PHOTOS_PER_CHUNK = 12;
+
+const PLANS: Record<string, number> = {
+  basic: 100,
+  standard: 10000,
+  premium: Infinity,
+};
 
 const EventPage = () => {
   const { eventId } = useParams();
@@ -59,13 +69,24 @@ const EventPage = () => {
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [visibleCount, setVisibleCount] = useState(PHOTOS_PER_CHUNK);
+
+  // Owner features
+  const [uploadProgress, setUploadProgress] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [confirmDeletePhotoId, setConfirmDeletePhotoId] = useState<string | null>(null);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+
+  const isOwner = !!(user && event && event.created_by === user.id);
+  const isApproved = event?.status === "approved";
 
   useEffect(() => {
-    if (!isAdmin) {
+    if (!isOwner) {
       loadFaceModels().catch(console.error);
     }
-  }, [isAdmin]);
+  }, [isOwner]);
 
   useEffect(() => {
     if (eventId) fetchEvent();
@@ -110,7 +131,9 @@ const EventPage = () => {
 
     const eventData = data as EventRow;
 
-    if (eventData.status !== "approved" && !isAdmin) {
+    // Owner and admin can always see their event; guests only see approved
+    const currentIsOwner = user && eventData.created_by === user.id;
+    if (eventData.status !== "approved" && !isAdmin && !currentIsOwner) {
       toast({ title: "Event not available", description: "This event is not yet approved", variant: "destructive" });
       setEvent(null);
       setLoading(false);
@@ -128,13 +151,15 @@ const EventPage = () => {
     const photos = (photosData as PhotoRow[]) || [];
     setAllPhotos(photos);
 
-    if (isAdmin) {
+    // Owner or admin → show gallery directly
+    if (currentIsOwner || isAdmin) {
       setMatchedPhotos(photos.map(p => ({ photo: p, confidence: 100 })));
-      setViewMode("admin-gallery");
+      setViewMode("owner-gallery");
       setLoading(false);
       return;
     }
 
+    // Guest: check for notify request
     if (user) {
       const { data: reqData } = await supabase
         .from("photo_requests")
@@ -148,6 +173,108 @@ const EventPage = () => {
     setLoading(false);
   };
 
+  // ── Owner: Upload photos ──
+  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || !event || !isOwner) return;
+
+    if (!isApproved) {
+      toast({ title: "Event not approved yet ⏳", description: "Wait for admin approval before uploading photos.", variant: "destructive" });
+      return;
+    }
+
+    const planLimit = PLANS[event.selected_plan] || 100;
+    if (planLimit !== Infinity && allPhotos.length + files.length > planLimit) {
+      toast({ title: "Plan limit reached", description: `Your plan allows max ${planLimit} photos.`, variant: "destructive" });
+      return;
+    }
+
+    const totalFiles = files.length;
+    let uploaded = 0;
+    setUploadProgress(`Uploading 0/${totalFiles}...`);
+
+    const uploadedPhotos: { id: string; url: string }[] = [];
+    for (const file of Array.from(files)) {
+      const ext = file.name.split(".").pop();
+      const path = `${event.id}/${crypto.randomUUID()}.${ext}`;
+      const { error: uploadError } = await supabase.storage.from("event-photos").upload(path, file);
+      if (uploadError) { console.error("Upload error:", uploadError.message); continue; }
+
+      const { data: urlData } = supabase.storage.from("event-photos").getPublicUrl(path);
+      const { data: photoRow, error: insertErr } = await supabase
+        .from("photos")
+        .insert({ event_id: event.id, image_url: urlData.publicUrl })
+        .select("id")
+        .single();
+
+      if (insertErr || !photoRow) continue;
+      uploadedPhotos.push({ id: photoRow.id, url: urlData.publicUrl });
+      uploaded++;
+      setUploadProgress(`Uploaded ${uploaded}/${totalFiles}`);
+    }
+
+    // Detect faces
+    let totalFaces = 0;
+    setUploadProgress("Detecting faces...");
+    const urls = uploadedPhotos.map(p => p.url);
+    const batchResults = await detectFacesBatch(urls, 3, (done, total) => {
+      setUploadProgress(`Detecting faces: ${done}/${total}`);
+    });
+
+    for (const result of batchResults) {
+      const photo = uploadedPhotos.find(p => p.url === result.url);
+      if (!photo) continue;
+      for (const desc of result.descriptors) {
+        await supabase.from("faces").insert({ photo_id: photo.id, descriptor: Array.from(desc) });
+        totalFaces++;
+      }
+    }
+
+    setUploadProgress(null);
+    toast({ title: "Upload Complete!", description: `${uploaded} photos, ${totalFaces} faces detected` });
+    if (uploadInputRef.current) uploadInputRef.current.value = "";
+    fetchEvent();
+  };
+
+  // ── Owner: Delete a photo ──
+  const handleDeletePhoto = async (photoId: string) => {
+    if (!isOwner) return;
+    setConfirmDeletePhotoId(null);
+
+    const photo = allPhotos.find(p => p.id === photoId);
+    if (!photo) return;
+
+    // Delete faces
+    await supabase.from("faces").delete().eq("photo_id", photoId);
+
+    // Delete from storage
+    const match = photo.image_url.match(/event-photos\/(.+?)(\?|$)/);
+    if (match) {
+      await supabase.storage.from("event-photos").remove([match[1]]);
+    }
+
+    // Delete photo record
+    await supabase.from("photos").delete().eq("id", photoId);
+
+    toast({ title: "Photo deleted" });
+    setAllPhotos(prev => prev.filter(p => p.id !== photoId));
+    setMatchedPhotos(prev => prev.filter(p => p.photo.id !== photoId));
+  };
+
+  // ── Owner: Edit event name ──
+  const handleSaveName = async () => {
+    if (!event || !isOwner || !newName.trim()) return;
+    const { error } = await supabase.from("events").update({ name: newName.trim() }).eq("id", event.id);
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      setEvent({ ...event, name: newName.trim() });
+      toast({ title: "Event name updated ✅" });
+    }
+    setEditingName(false);
+  };
+
+  // ── Guest: Selfie upload & search ──
   const handleSelfieUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -158,7 +285,6 @@ const EventPage = () => {
     const reader = new FileReader();
     reader.onload = async (ev) => {
       const dataUrl = ev.target?.result as string;
-
       const result = await detectSelfie(dataUrl);
 
       if (!result) {
@@ -170,7 +296,6 @@ const EventPage = () => {
 
       setSearchStatus("");
       setSelfiePreview(dataUrl);
-      // Auto-start search
       startSearch(dataUrl, result);
     };
     reader.readAsDataURL(file);
@@ -265,7 +390,7 @@ const EventPage = () => {
   };
 
   const handleDownloadAll = async () => {
-    const photos = viewMode === "admin-gallery" ? allPhotos : matchedPhotos.map(m => m.photo);
+    const photos = viewMode === "owner-gallery" ? allPhotos : matchedPhotos.map(m => m.photo);
     if (photos.length === 0) return;
     setDownloading(true);
     try {
@@ -311,7 +436,7 @@ const EventPage = () => {
   };
 
   const eventUrl = event ? `${window.location.origin}/event/${event.event_code}` : "";
-  const displayPhotos = viewMode === "admin-gallery" ? allPhotos.map(p => ({ photo: p, confidence: 100 })) : matchedPhotos;
+  const displayPhotos = viewMode === "owner-gallery" ? allPhotos.map(p => ({ photo: p, confidence: 100 })) : matchedPhotos;
   const visiblePhotos = displayPhotos.slice(0, visibleCount);
 
   if (loading) {
@@ -349,6 +474,25 @@ const EventPage = () => {
     <div className="min-h-screen bg-gradient-dark">
       <Navbar />
 
+      {/* Delete photo confirmation */}
+      <AnimatePresence>
+        {confirmDeletePhotoId && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} exit={{ scale: 0.9 }} className="bg-card border border-border rounded-2xl p-6 max-w-sm w-full shadow-card">
+              <Trash2 className="w-10 h-10 text-destructive mx-auto mb-4" />
+              <h3 className="font-display font-semibold text-lg text-center mb-2">Delete Photo?</h3>
+              <p className="text-muted-foreground text-sm text-center mb-6">This will permanently remove the photo and its face data.</p>
+              <div className="flex gap-3">
+                <Button variant="ghost" className="flex-1" onClick={() => setConfirmDeletePhotoId(null)}>Cancel</Button>
+                <Button variant="destructive" className="flex-1" onClick={() => handleDeletePhoto(confirmDeletePhotoId)}>
+                  <Trash2 className="w-4 h-4" /> Delete
+                </Button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {lightboxIndex !== null && (
         <PhotoLightbox
           photos={displayPhotos.map(d => d.photo)}
@@ -362,26 +506,69 @@ const EventPage = () => {
         />
       )}
 
+      <input ref={uploadInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handlePhotoUpload} />
+
       <div className="container pt-20 pb-16">
+        {/* Header */}
         <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-8 pt-4">
           <div>
-            <Link to="/" className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground text-sm mb-3 font-display">
+            <Link to={isOwner ? "/my-events" : "/"} className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground text-sm mb-3 font-display">
               <ArrowLeft className="w-4 h-4" /> Back
             </Link>
-            <h1 className="font-display font-bold text-2xl md:text-4xl text-foreground">{event.name}</h1>
+
+            {editingName && isOwner ? (
+              <div className="flex items-center gap-2">
+                <Input value={newName} onChange={e => setNewName(e.target.value)} className="bg-secondary border-border text-foreground h-10 font-display font-bold text-xl max-w-xs" autoFocus />
+                <button onClick={handleSaveName} className="p-2 rounded-lg bg-primary text-primary-foreground"><Check className="w-4 h-4" /></button>
+                <button onClick={() => setEditingName(false)} className="p-2 rounded-lg bg-secondary text-muted-foreground"><X className="w-4 h-4" /></button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <h1 className="font-display font-bold text-2xl md:text-4xl text-foreground">{event.name}</h1>
+                {isOwner && (
+                  <button onClick={() => { setEditingName(true); setNewName(event.name); }} className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors" title="Edit event name">
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            )}
+
             <div className="flex items-center gap-4 text-muted-foreground text-sm mt-2">
               {event.date && (
                 <span>{new Date(event.date).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}</span>
               )}
               <span className="flex items-center gap-1"><ImageIcon className="w-3.5 h-3.5" />{allPhotos.length} photos</span>
+              {isOwner && !isApproved && (
+                <span className="inline-flex items-center gap-1 text-xs bg-yellow-500/20 text-yellow-400 px-2 py-0.5 rounded-full">
+                  <Lock className="w-3 h-3" /> Pending Approval
+                </span>
+              )}
             </div>
           </div>
           <div className="flex gap-3">
+            {isOwner && isApproved && (
+              <Button variant="hero" size="sm" onClick={() => uploadInputRef.current?.click()}>
+                <Upload className="w-4 h-4" /> Upload Photos
+              </Button>
+            )}
+            {isOwner && !isApproved && (
+              <Button variant="glass" size="sm" disabled className="opacity-60">
+                <Lock className="w-4 h-4" /> Upload Locked
+              </Button>
+            )}
             <Button variant="glass" size="sm" onClick={() => setShowQR(!showQR)}>
               <Share2 className="w-4 h-4" /> Share
             </Button>
           </div>
         </div>
+
+        {/* Upload progress */}
+        {uploadProgress && (
+          <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="mb-6 bg-primary/10 border border-primary/20 rounded-xl p-4 flex items-center gap-3">
+            <Brain className="w-5 h-5 text-primary animate-pulse" />
+            <span className="text-sm text-foreground font-display">{uploadProgress}</span>
+          </motion.div>
+        )}
 
         <AnimatePresence>
           {showQR && (
@@ -402,8 +589,8 @@ const EventPage = () => {
           )}
         </AnimatePresence>
 
-        {/* PROMPT: Upload selfie */}
-        {viewMode === "prompt" && (
+        {/* GUEST: Upload selfie prompt */}
+        {viewMode === "prompt" && !isOwner && (
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="max-w-lg mx-auto py-12">
             <div className="bg-gradient-card border border-border rounded-2xl p-8 shadow-card text-center">
               <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto mb-4">
@@ -484,15 +671,19 @@ const EventPage = () => {
           </motion.div>
         )}
 
-        {/* RESULTS or ADMIN GALLERY */}
-        {(viewMode === "results" || viewMode === "admin-gallery") && (
+        {/* RESULTS (guest) or OWNER GALLERY */}
+        {(viewMode === "results" || viewMode === "owner-gallery") && (
           <>
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mb-8">
               <div className="bg-primary/10 border border-primary/20 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 mb-6">
                 <div className="flex items-center gap-3">
-                  {viewMode === "admin-gallery" ? (
+                  {viewMode === "owner-gallery" ? (
                     <span className="text-sm text-foreground font-display">
-                      Showing <strong className="text-primary">all {allPhotos.length} photos</strong> (Admin view)
+                      {isOwner ? (
+                        <>Your event · <strong className="text-primary">{allPhotos.length} photos</strong></>
+                      ) : (
+                        <>Showing <strong className="text-primary">all {allPhotos.length} photos</strong> (Admin view)</>
+                      )}
                     </span>
                   ) : (
                     <>
@@ -512,7 +703,7 @@ const EventPage = () => {
                   )}
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  {viewMode !== "admin-gallery" && (
+                  {viewMode === "results" && (
                     <Button variant="glass" size="sm" onClick={resetSearch}>
                       <RotateCcw className="w-4 h-4" /> Upload Another Selfie
                     </Button>
@@ -559,7 +750,7 @@ const EventPage = () => {
                     >
                       <img src={photo.image_url} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" loading="lazy" />
 
-                      {viewMode !== "admin-gallery" && (
+                      {viewMode === "results" && (
                         <div className="absolute top-2 right-2 bg-background/70 backdrop-blur-sm rounded-lg px-2 py-0.5 text-xs font-display font-semibold text-primary">
                           {confidence}%
                         </div>
@@ -572,7 +763,7 @@ const EventPage = () => {
                       )}
 
                       {new Date(photo.created_at).getTime() > Date.now() - 86400000 && (
-                        <div className="absolute top-2 left-2 bg-primary/90 text-primary-foreground text-xs px-1.5 py-0.5 rounded font-display font-semibold">
+                        <div className={`absolute top-2 ${favorites.has(photo.id) ? 'left-8' : 'left-2'} bg-primary/90 text-primary-foreground text-xs px-1.5 py-0.5 rounded font-display font-semibold`}>
                           NEW
                         </div>
                       )}
@@ -586,6 +777,11 @@ const EventPage = () => {
                           <button onClick={(e) => { e.stopPropagation(); handleShareWhatsApp(photo.image_url); }} className="p-2 bg-background/60 backdrop-blur-sm rounded-lg text-foreground hover:text-primary transition-colors">
                             <Share2 className="w-4 h-4" />
                           </button>
+                          {isOwner && (
+                            <button onClick={(e) => { e.stopPropagation(); setConfirmDeletePhotoId(photo.id); }} className="p-2 bg-background/60 backdrop-blur-sm rounded-lg text-foreground hover:text-destructive transition-colors">
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
                         </div>
                         <button onClick={(e) => { e.stopPropagation(); handleDownloadSingle(photo.image_url, i); }} className="p-2 bg-background/60 backdrop-blur-sm rounded-lg text-foreground hover:text-primary transition-colors">
                           <Download className="w-4 h-4" />
@@ -603,6 +799,21 @@ const EventPage = () => {
                   </div>
                 )}
               </>
+            )}
+
+            {viewMode === "owner-gallery" && allPhotos.length === 0 && isOwner && (
+              <div className="text-center py-12">
+                <ImageIcon className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
+                <h3 className="font-display font-semibold text-lg mb-2">No photos yet</h3>
+                <p className="text-muted-foreground text-sm mb-4">
+                  {isApproved ? "Upload photos for your guests to find" : "Your event needs admin approval before you can upload photos"}
+                </p>
+                {isApproved && (
+                  <Button variant="hero" onClick={() => uploadInputRef.current?.click()}>
+                    <Upload className="w-4 h-4" /> Upload Photos
+                  </Button>
+                )}
+              </div>
             )}
           </>
         )}
