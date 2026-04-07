@@ -40,6 +40,7 @@ interface EventRow {
   created_by: string | null;
   selected_plan: string;
   payment_status: string;
+  expiry_date: string | null;
 }
 
 const PHOTOS_PER_CHUNK = 12;
@@ -81,6 +82,9 @@ const EventPage = () => {
 
   const isOwner = !!(user && event && event.created_by === user.id);
   const isApproved = event?.status === "approved";
+  const isExpired = !!(event?.expiry_date && new Date(event.expiry_date) < new Date());
+  const daysLeft = event?.expiry_date ? Math.ceil((new Date(event.expiry_date).getTime() - Date.now()) / 86400000) : null;
+  const canManage = isOwner && isApproved && !isExpired;
 
   useEffect(() => {
     if (!isOwner) {
@@ -176,10 +180,10 @@ const EventPage = () => {
   // ── Owner: Upload photos ──
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (!files || !event || !isOwner) return;
+    if (!files || !event || !canManage) return;
 
-    if (!isApproved) {
-      toast({ title: "Event not approved yet ⏳", description: "Wait for admin approval before uploading photos.", variant: "destructive" });
+    if (isExpired) {
+      toast({ title: "Event expired 🔒", description: "Renew your event to upload photos.", variant: "destructive" });
       return;
     }
 
@@ -238,7 +242,7 @@ const EventPage = () => {
 
   // ── Owner: Delete a photo ──
   const handleDeletePhoto = async (photoId: string) => {
-    if (!isOwner) return;
+    if (!canManage) return;
     setConfirmDeletePhotoId(null);
 
     const photo = allPhotos.find(p => p.id === photoId);
@@ -539,14 +543,24 @@ const EventPage = () => {
               )}
               <span className="flex items-center gap-1"><ImageIcon className="w-3.5 h-3.5" />{allPhotos.length} photos</span>
               {isOwner && !isApproved && (
-                <span className="inline-flex items-center gap-1 text-xs bg-yellow-500/20 text-yellow-400 px-2 py-0.5 rounded-full">
+                <span className="inline-flex items-center gap-1 text-xs bg-destructive/20 text-destructive px-2 py-0.5 rounded-full">
                   <Lock className="w-3 h-3" /> Pending Approval
+                </span>
+              )}
+              {isOwner && isApproved && !isExpired && daysLeft !== null && (
+                <span className="inline-flex items-center gap-1 text-xs bg-primary/20 text-primary px-2 py-0.5 rounded-full">
+                  🟢 {daysLeft}d left
+                </span>
+              )}
+              {isOwner && isExpired && (
+                <span className="inline-flex items-center gap-1 text-xs bg-destructive/20 text-destructive px-2 py-0.5 rounded-full">
+                  🔴 Expired
                 </span>
               )}
             </div>
           </div>
-          <div className="flex gap-3">
-            {isOwner && isApproved && (
+          <div className="flex flex-wrap gap-3">
+            {canManage && (
               <Button variant="hero" size="sm" onClick={() => uploadInputRef.current?.click()}>
                 <Upload className="w-4 h-4" /> Upload Photos
               </Button>
@@ -554,6 +568,13 @@ const EventPage = () => {
             {isOwner && !isApproved && (
               <Button variant="glass" size="sm" disabled className="opacity-60">
                 <Lock className="w-4 h-4" /> Upload Locked
+              </Button>
+            )}
+            {isOwner && isExpired && (
+              <Button variant="hero" size="sm" onClick={() => {
+                toast({ title: "Renewal Required 💰", description: "Contact admin or pay ₹49 to renew for 30 more days." });
+              }}>
+                <RotateCcw className="w-4 h-4" /> Renew Event
               </Button>
             )}
             <Button variant="glass" size="sm" onClick={() => setShowQR(!showQR)}>
@@ -777,7 +798,7 @@ const EventPage = () => {
                           <button onClick={(e) => { e.stopPropagation(); handleShareWhatsApp(photo.image_url); }} className="p-2 bg-background/60 backdrop-blur-sm rounded-lg text-foreground hover:text-primary transition-colors">
                             <Share2 className="w-4 h-4" />
                           </button>
-                          {isOwner && (
+                          {canManage && (
                             <button onClick={(e) => { e.stopPropagation(); setConfirmDeletePhotoId(photo.id); }} className="p-2 bg-background/60 backdrop-blur-sm rounded-lg text-foreground hover:text-destructive transition-colors">
                               <Trash2 className="w-4 h-4" />
                             </button>
@@ -806,9 +827,9 @@ const EventPage = () => {
                 <ImageIcon className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
                 <h3 className="font-display font-semibold text-lg mb-2">No photos yet</h3>
                 <p className="text-muted-foreground text-sm mb-4">
-                  {isApproved ? "Upload photos for your guests to find" : "Your event needs admin approval before you can upload photos"}
+                  {isExpired ? "Your event has expired. Renew to upload photos." : isApproved ? "Upload photos for your guests to find" : "Your event needs admin approval before you can upload photos"}
                 </p>
-                {isApproved && (
+                {canManage && (
                   <Button variant="hero" onClick={() => uploadInputRef.current?.click()}>
                     <Upload className="w-4 h-4" /> Upload Photos
                   </Button>

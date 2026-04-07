@@ -26,6 +26,7 @@ interface EventRow {
   selected_plan: string;
   payment_status: string;
   status: string;
+  expiry_date: string | null;
 }
 
 interface ProfileRow {
@@ -93,12 +94,33 @@ const Admin = () => {
   };
 
   const handleApprove = async (eventId: string) => {
-    const { error } = await supabase.from("events").update({ status: "approved", payment_status: "paid" }).eq("id", eventId);
+    const expiryDate = new Date();
+    expiryDate.setDate(expiryDate.getDate() + 30);
+    const { error } = await supabase.from("events").update({
+      status: "approved",
+      payment_status: "paid",
+      expiry_date: expiryDate.toISOString(),
+    }).eq("id", eventId);
     if (error) {
       toast({ title: "Error", description: error.message, variant: "destructive" });
     } else {
-      toast({ title: "Event approved! ✅" });
+      toast({ title: "Event approved! ✅", description: "Active for 30 days." });
       fetchPendingEvents();
+      fetchAllEvents();
+    }
+  };
+
+  const handleExtendExpiry = async (eventId: string) => {
+    // Find current expiry or use now
+    const event = allEvents.find(e => e.id === eventId);
+    const base = event?.expiry_date ? new Date(event.expiry_date) : new Date();
+    const newExpiry = new Date(Math.max(base.getTime(), Date.now()));
+    newExpiry.setDate(newExpiry.getDate() + 30);
+    const { error } = await supabase.from("events").update({ expiry_date: newExpiry.toISOString() }).eq("id", eventId);
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Expiry extended by 30 days ✅" });
       fetchAllEvents();
     }
   };
@@ -364,14 +386,29 @@ const Admin = () => {
                 <h3 className="font-display font-semibold text-lg">No events yet</h3>
               </div>
             ) : (
-              allEvents.map(ev => (
+              allEvents.map(ev => {
+                const isExpired = ev.expiry_date ? new Date(ev.expiry_date) < new Date() : false;
+                const daysLeft = ev.expiry_date ? Math.ceil((new Date(ev.expiry_date).getTime() - Date.now()) / 86400000) : null;
+                return (
                 <motion.div key={ev.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="bg-gradient-card border border-border rounded-xl p-4 shadow-card flex items-center justify-between">
                   <div>
                     <p className="font-display font-medium text-foreground">{ev.name}</p>
-                    <p className="text-xs text-muted-foreground">{new Date(ev.created_at).toLocaleDateString()} · {ev.selected_plan} · Code: {ev.event_code}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {new Date(ev.created_at).toLocaleDateString()} · {ev.selected_plan} · Code: {ev.event_code}
+                      {daysLeft !== null && (
+                        <span className={`ml-2 ${isExpired ? 'text-destructive' : 'text-primary'}`}>
+                          {isExpired ? '🔴 Expired' : `🟢 ${daysLeft}d left`}
+                        </span>
+                      )}
+                    </p>
                   </div>
                   <div className="flex items-center gap-2">
                     {getStatusBadge(ev.status)}
+                    {ev.status === "approved" && (
+                      <Button variant="ghost" size="sm" className="text-primary hover:bg-primary/10" onClick={() => handleExtendExpiry(ev.id)} title="Extend 30 days">
+                        <RefreshCw className="w-3 h-3" />
+                      </Button>
+                    )}
                     <Button variant="ghost" size="sm" onClick={() => navigate(`/event/${ev.event_code}`)}>
                       <Eye className="w-3 h-3" />
                     </Button>
@@ -380,7 +417,8 @@ const Admin = () => {
                     </Button>
                   </div>
                 </motion.div>
-              ))
+                );
+              })
             )}
           </div>
         )}
