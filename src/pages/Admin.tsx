@@ -26,6 +26,7 @@ interface EventRow {
   selected_plan: string;
   payment_status: string;
   status: string;
+  expiry_date: string | null;
 }
 
 interface ProfileRow {
