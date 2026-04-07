@@ -82,6 +82,9 @@ const EventPage = () => {
 
   const isOwner = !!(user && event && event.created_by === user.id);
   const isApproved = event?.status === "approved";
+  const isExpired = !!(event?.expiry_date && new Date(event.expiry_date) < new Date());
+  const daysLeft = event?.expiry_date ? Math.ceil((new Date(event.expiry_date).getTime() - Date.now()) / 86400000) : null;
+  const canManage = isOwner && isApproved && !isExpired;
 
   useEffect(() => {
     if (!isOwner) {
