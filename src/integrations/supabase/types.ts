@@ -21,6 +21,7 @@ export type Database = {
           created_by: string | null
           date: string | null
           event_code: string
+          expiry_date: string | null
           id: string
           name: string
           payment_status: string
@@ -33,6 +34,7 @@ export type Database = {
           created_by?: string | null
           date?: string | null
           event_code: string
+          expiry_date?: string | null
           id?: string
           name: string
           payment_status?: string
@@ -45,6 +47,7 @@ export type Database = {
           created_by?: string | null
           date?: string | null
           event_code?: string
+          expiry_date?: string | null
           id?: string
           name?: string
           payment_status?: string
