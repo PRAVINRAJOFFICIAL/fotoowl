@@ -138,7 +138,7 @@ const Admin = () => {
     setConfirmDeleteId(null);
     try {
       await deleteEventCascade(eventId);
-      toast({ title: "Event rejected & deleted ❌" });
+      toast({ title: "Event deleted ❌" });
       fetchPendingEvents();
       fetchAllEvents();
       fetchGlobalStats();
