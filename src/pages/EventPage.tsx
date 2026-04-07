@@ -829,7 +829,7 @@ const EventPage = () => {
                 <p className="text-muted-foreground text-sm mb-4">
                   {isExpired ? "Your event has expired. Renew to upload photos." : isApproved ? "Upload photos for your guests to find" : "Your event needs admin approval before you can upload photos"}
                 </p>
-                {isApproved && (
+                {canManage && (
                   <Button variant="hero" onClick={() => uploadInputRef.current?.click()}>
                     <Upload className="w-4 h-4" /> Upload Photos
                   </Button>
