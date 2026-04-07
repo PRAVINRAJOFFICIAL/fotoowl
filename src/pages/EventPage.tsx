@@ -180,10 +180,10 @@ const EventPage = () => {
   // ── Owner: Upload photos ──
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (!files || !event || !isOwner) return;
+    if (!files || !event || !canManage) return;
 
-    if (!isApproved) {
-      toast({ title: "Event not approved yet ⏳", description: "Wait for admin approval before uploading photos.", variant: "destructive" });
+    if (isExpired) {
+      toast({ title: "Event expired 🔒", description: "Renew your event to upload photos.", variant: "destructive" });
       return;
     }
 
@@ -242,7 +242,7 @@ const EventPage = () => {
 
   // ── Owner: Delete a photo ──
   const handleDeletePhoto = async (photoId: string) => {
-    if (!isOwner) return;
+    if (!canManage) return;
     setConfirmDeletePhotoId(null);
 
     const photo = allPhotos.find(p => p.id === photoId);
