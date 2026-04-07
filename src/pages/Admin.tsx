@@ -375,6 +375,9 @@ const Admin = () => {
                     <Button variant="ghost" size="sm" onClick={() => navigate(`/event/${ev.event_code}`)}>
                       <Eye className="w-3 h-3" />
                     </Button>
+                    <Button variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10" onClick={() => setConfirmDeleteId(ev.id)}>
+                      <Trash2 className="w-3 h-3" />
+                    </Button>
                   </div>
                 </motion.div>
               ))
