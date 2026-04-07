@@ -386,14 +386,29 @@ const Admin = () => {
                 <h3 className="font-display font-semibold text-lg">No events yet</h3>
               </div>
             ) : (
-              allEvents.map(ev => (
+              allEvents.map(ev => {
+                const isExpired = ev.expiry_date ? new Date(ev.expiry_date) < new Date() : false;
+                const daysLeft = ev.expiry_date ? Math.ceil((new Date(ev.expiry_date).getTime() - Date.now()) / 86400000) : null;
+                return (
                 <motion.div key={ev.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="bg-gradient-card border border-border rounded-xl p-4 shadow-card flex items-center justify-between">
                   <div>
                     <p className="font-display font-medium text-foreground">{ev.name}</p>
-                    <p className="text-xs text-muted-foreground">{new Date(ev.created_at).toLocaleDateString()} · {ev.selected_plan} · Code: {ev.event_code}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {new Date(ev.created_at).toLocaleDateString()} · {ev.selected_plan} · Code: {ev.event_code}
+                      {daysLeft !== null && (
+                        <span className={`ml-2 ${isExpired ? 'text-destructive' : 'text-primary'}`}>
+                          {isExpired ? '🔴 Expired' : `🟢 ${daysLeft}d left`}
+                        </span>
+                      )}
+                    </p>
                   </div>
                   <div className="flex items-center gap-2">
                     {getStatusBadge(ev.status)}
+                    {ev.status === "approved" && (
+                      <Button variant="ghost" size="sm" className="text-primary hover:bg-primary/10" onClick={() => handleExtendExpiry(ev.id)} title="Extend 30 days">
+                        <RefreshCw className="w-3 h-3" />
+                      </Button>
+                    )}
                     <Button variant="ghost" size="sm" onClick={() => navigate(`/event/${ev.event_code}`)}>
                       <Eye className="w-3 h-3" />
                     </Button>
@@ -402,6 +417,8 @@ const Admin = () => {
                     </Button>
                   </div>
                 </motion.div>
+                );
+              })
               ))
             )}
           </div>
