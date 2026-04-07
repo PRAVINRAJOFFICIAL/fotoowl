@@ -418,8 +418,7 @@ const Admin = () => {
                   </div>
                 </motion.div>
                 );
-              })
-              ))
+              )
             )}
           </div>
         )}
