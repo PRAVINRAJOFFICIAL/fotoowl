@@ -40,6 +40,7 @@ interface EventRow {
   created_by: string | null;
   selected_plan: string;
   payment_status: string;
+  expiry_date: string | null;
 }
 
 const PHOTOS_PER_CHUNK = 12;
