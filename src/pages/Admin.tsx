@@ -93,12 +93,33 @@ const Admin = () => {
   };
 
   const handleApprove = async (eventId: string) => {
-    const { error } = await supabase.from("events").update({ status: "approved", payment_status: "paid" }).eq("id", eventId);
+    const expiryDate = new Date();
+    expiryDate.setDate(expiryDate.getDate() + 30);
+    const { error } = await supabase.from("events").update({
+      status: "approved",
+      payment_status: "paid",
+      expiry_date: expiryDate.toISOString(),
+    }).eq("id", eventId);
     if (error) {
       toast({ title: "Error", description: error.message, variant: "destructive" });
     } else {
-      toast({ title: "Event approved! ✅" });
+      toast({ title: "Event approved! ✅", description: "Active for 30 days." });
       fetchPendingEvents();
+      fetchAllEvents();
+    }
+  };
+
+  const handleExtendExpiry = async (eventId: string) => {
+    // Find current expiry or use now
+    const event = allEvents.find(e => e.id === eventId);
+    const base = event?.expiry_date ? new Date(event.expiry_date) : new Date();
+    const newExpiry = new Date(Math.max(base.getTime(), Date.now()));
+    newExpiry.setDate(newExpiry.getDate() + 30);
+    const { error } = await supabase.from("events").update({ expiry_date: newExpiry.toISOString() }).eq("id", eventId);
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Expiry extended by 30 days ✅" });
       fetchAllEvents();
     }
   };
