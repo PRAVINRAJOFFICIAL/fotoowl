@@ -79,14 +79,16 @@ export function euclideanDistance(a: Float32Array | number[], b: Float32Array | 
   return Math.sqrt(sum);
 }
 
-/** Convert distance to confidence percentage (0.0 → 100%, 0.55 → 0%) */
+/** Convert distance to confidence percentage (0.0 → 100%, 0.52 → 0%) */
 export function distanceToConfidence(distance: number): number {
-  return Math.max(0, Math.min(100, Math.round((1 - distance / 0.55) * 100)));
+  return Math.max(0, Math.min(100, Math.round((1 - distance / 0.52) * 100)));
 }
 
 // ── Detection ──
 
 const MIN_FACE_SIZE = 60;
+const PRIMARY_THRESHOLD = 0.48;
+const FALLBACK_THRESHOLD = 0.52;
 
 export async function detectFaces(imageUrl: string): Promise<Float32Array[]> {
   await loadFaceModels();
@@ -95,7 +97,7 @@ export async function detectFaces(imageUrl: string): Promise<Float32Array[]> {
   const canvas = resizeImage(img, 640);
 
   const detections = await faceapi
-    .detectAllFaces(canvas, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
+    .detectAllFaces(canvas, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.8 }))
     .withFaceLandmarks()
     .withFaceDescriptors();
 
@@ -180,17 +182,18 @@ export interface MatchCandidate {
 }
 
 /**
- * Simple single-selfie matching:
- * - For each photo, pick the lowest distance face
- * - Filter by threshold (default 0.5)
- * - Filter by min confidence (75%)
- * - Sort by distance ascending
+ * Single-selfie matching with strict thresholds:
+ * - Primary threshold: 0.48 (strict accept)
+ * - Fallback threshold: 0.52 (hard reject above this)
+ * - Min confidence: 75%
+ * - Hard negative filter: reject ambiguous top-2 matches
+ * - Limit to top 10 results
  */
 export function matchFaces(
   selfieDescriptors: Float32Array[],
   storedFaces: { photo_id: string; descriptor: number[] }[],
-  threshold: number = 0.5,
-  maxResults: number = 50
+  threshold: number = PRIMARY_THRESHOLD,
+  maxResults: number = 10
 ): MatchCandidate[] {
   if (selfieDescriptors.length === 0 || storedFaces.length === 0) return [];
 
@@ -210,7 +213,8 @@ export function matchFaces(
   const candidates: MatchCandidate[] = [];
 
   for (const [photoId, distance] of bestPerPhoto) {
-    if (distance > threshold) continue;
+    // Hard reject anything above fallback threshold
+    if (distance > FALLBACK_THRESHOLD) continue;
     const confidence = distanceToConfidence(distance);
     if (confidence < 75) continue;
     candidates.push({ photoId, distance, confidence });
@@ -218,7 +222,7 @@ export function matchFaces(
 
   candidates.sort((a, b) => a.distance - b.distance);
 
-  // Hard negative filter
+  // Hard negative filter: if top 2 are very close in distance and both weak, reject second
   if (candidates.length >= 2) {
     const diff = Math.abs(candidates[0].distance - candidates[1].distance);
     if (diff < 0.015 && candidates[0].distance > 0.35) {
