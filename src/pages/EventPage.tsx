@@ -798,7 +798,7 @@ const EventPage = () => {
                           <button onClick={(e) => { e.stopPropagation(); handleShareWhatsApp(photo.image_url); }} className="p-2 bg-background/60 backdrop-blur-sm rounded-lg text-foreground hover:text-primary transition-colors">
                             <Share2 className="w-4 h-4" />
                           </button>
-                          {isOwner && (
+                          {canManage && (
                             <button onClick={(e) => { e.stopPropagation(); setConfirmDeletePhotoId(photo.id); }} className="p-2 bg-background/60 backdrop-blur-sm rounded-lg text-foreground hover:text-destructive transition-colors">
                               <Trash2 className="w-4 h-4" />
                             </button>
